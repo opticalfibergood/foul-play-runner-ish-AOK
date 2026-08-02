@@ -1,0 +1,104 @@
+name: Build foul-play rootfs for iSH-AOK
+
+on:
+  # Rebuild every Monday so Alpine security updates + foul-play/poke-engine
+  # changes get picked up automatically. Scheduled runs have no workflow
+  # inputs, so they always use the default runner (ubuntu-24.04-arm) --
+  # if this repo is private, either trigger via workflow_dispatch with a
+  # blacksmith-*-arm runner instead, or edit the fallback below.
+  schedule:
+    - cron: "17 6 * * 1"
+
+  # Manual "build me an update" button, with a couple of knobs.
+  workflow_dispatch:
+    inputs:
+      poke_engine_gen:
+        description: >
+          poke-engine generation feature to compile in. "default" keeps
+          whatever foul-play's requirements.txt already pins (currently
+          gen9 / terastallization).
+        type: choice
+        default: default
+        options:
+          - default
+          - gen1
+          - gen2
+          - gen3
+          - gen4
+          - gen5
+          - gen6
+          - gen7
+          - gen8
+          - gen9
+      foul_play_ref:
+        description: "foul-play git ref (branch, tag, or commit) to build"
+        type: string
+        default: main
+      runner:
+        description: >
+          Runner label. ubuntu-24.04-arm/ubuntu-22.04-arm are GitHub's own
+          free, native aarch64 hosted runners -- but ONLY on public repos
+          (they fail outright on private repos). If this repo is private,
+          pick a blacksmith-*-arm label instead (needs the Blacksmith
+          GitHub App installed; see README).
+        type: choice
+        default: ubuntu-24.04-arm
+        options:
+          - ubuntu-24.04-arm
+          - ubuntu-22.04-arm
+          - blacksmith-4vcpu-ubuntu-2404-arm
+          - blacksmith-2vcpu-ubuntu-2404-arm
+
+  # Lets you sanity-check changes to the build scripts themselves without
+  # waiting for Monday. Does not publish a release.
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/build-rootfs.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 60
+    env:
+      ARCH: aarch64
+      # Raw input passed through as-is (may be "default", a gen name, or
+      # unset on schedule/push runs); build-rootfs.sh normalizes "default"
+      # (and unset) to "" itself, since that's easier to get right in shell
+      # than in Actions' expression syntax.
+      POKE_ENGINE_GEN: ${{ github.event.inputs.poke_engine_gen }}
+      FOUL_PLAY_REF: ${{ github.event.inputs.foul_play_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Alpine rootfs with foul-play installed
+        run: sudo -E ./scripts/build-rootfs.sh
+
+      - name: Show artifact
+        run: |
+          ls -lh out/
+          cat out/BUILD_INFO.txt
+
+      - name: Upload build artifact (debugging / non-release runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: foul-play-ish-aok-rootfs
+          path: out/*
+          retention-days: 14
+
+      - name: Publish / update release
+        if: github.event_name != 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rootfs-latest
+          name: "foul-play rootfs for iSH-AOK (auto-built)"
+          body_path: out/BUILD_INFO.txt
+          make_latest: true
+          files: |
+            out/*.tar.gz
+            out/*.sha256
+            out/BUILD_INFO.txt
