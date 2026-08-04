@@ -54,13 +54,25 @@ echo "==> Applying showdown-client-testclient.patch"
 # static, load-time fix rather than a runtime script injection), and
 # switches the two hardcoded-with-no-fallback pokedex-mini(.bw).js script
 # tags to local relative paths.
-if ! (cd play.pokemonshowdown.com && git apply --check "$PATCH_DIR/showdown-client-testclient.patch" 2>/tmp/patch-check.err); then
+#
+# Applied from the repo root (/opt/pokemon-showdown-client), NOT from
+# inside play.pokemonshowdown.com/ -- git apply resolves a patch's paths
+# relative to the top of the current git working tree, not the current
+# working directory, so running it from within the subdirectory silently
+# no-ops ("Skipped patch") instead of erroring. Confirmed by reproducing
+# it directly: git apply reported success either way, but only applying
+# from the repo root with the full play.pokemonshowdown.com/... path
+# actually changed the file. Caught by scripts/verify-testclient-html.js
+# failing in CI, not by git apply's own exit code, which is exactly why
+# that verification step does a real semantic check instead of trusting
+# "git apply didn't error" as proof of anything.
+if ! git apply --check "$PATCH_DIR/showdown-client-testclient.patch" 2>/tmp/patch-check.err; then
     echo "error: showdown-client-testclient.patch no longer applies cleanly to pokemon-showdown-client@${CLIENT_COMMIT}" >&2
     cat /tmp/patch-check.err >&2
     echo "testclient-new.html has likely changed upstream; the patch needs updating." >&2
     exit 1
 fi
-(cd play.pokemonshowdown.com && git apply "$PATCH_DIR/showdown-client-testclient.patch")
+git apply "$PATCH_DIR/showdown-client-testclient.patch"
 
 echo "==> Verifying the patched testclient-new.html (extracted-JS syntax + semantic check)"
 node "$SCRIPT_DIR/verify-testclient-html.js" play.pokemonshowdown.com/testclient-new.html

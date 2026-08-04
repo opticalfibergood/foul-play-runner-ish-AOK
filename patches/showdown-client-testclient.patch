@@ -1,7 +1,7 @@
-diff --git a/testclient-new.html b/testclient-new.html
+diff --git a/play.pokemonshowdown.com/testclient-new.html b/play.pokemonshowdown.com/testclient-new.html
 index d36feae..96a2af3 100644
---- a/testclient-new.html
-+++ b/testclient-new.html
+--- a/play.pokemonshowdown.com/testclient-new.html
++++ b/play.pokemonshowdown.com/testclient-new.html
 @@ -16,7 +16,7 @@
  	<div id="ps-frame">
  		<div id="header" class="header">

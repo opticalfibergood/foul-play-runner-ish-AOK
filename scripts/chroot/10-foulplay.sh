@@ -35,6 +35,11 @@ echo "==> Applying foulplay-noguest-login.patch"
 # git apply fails loudly (not silently) if foul-play's upstream file has
 # drifted from what this patch expects -- that's deliberate: better to
 # stop the build than silently ship a broken or half-applied patch.
+# git apply resolves patch paths relative to the repo root, not CWD --
+# this only works because we're sitting at /opt/foul-play (the repo root)
+# and the patch's path is fp/websocket_client.py, not a bare filename
+# applied from within fp/. See showdown-client-testclient.patch's
+# application in 30-showdown-client.sh for what goes wrong otherwise.
 if ! git apply --check "$PATCH_DIR/foulplay-noguest-login.patch" 2>/tmp/patch-check.err; then
     echo "error: foulplay-noguest-login.patch no longer applies cleanly to foul-play@${FOUL_PLAY_COMMIT}" >&2
     cat /tmp/patch-check.err >&2

@@ -28,6 +28,12 @@ echo "==> Applying showdown-server-config.patch"
 # adds a customhttpresponse hook that auto-sends `/trn human` once the
 # client's finished loading. git apply fails loudly if config-example.js
 # has drifted from what this patch expects.
+# git apply resolves patch paths relative to the repo root, not CWD --
+# this only works because we're sitting at /opt/pokemon-showdown (the
+# repo root) and the patch's path is config/config.js, not a bare
+# filename applied from within config/. See showdown-client-testclient.
+# patch's application in 30-showdown-client.sh for what goes wrong
+# otherwise.
 if ! git apply --check "$PATCH_DIR/showdown-server-config.patch" 2>/tmp/patch-check.err; then
     echo "error: showdown-server-config.patch no longer applies cleanly to pokemon-showdown@${SHOWDOWN_COMMIT}" >&2
     cat /tmp/patch-check.err >&2
