@@ -1,0 +1,127 @@
+diff --git a/config/config.js b/config/config.js
+index 8289fe3..cbf95f1 100644
+--- a/config/config.js
++++ b/config/config.js
+@@ -86,47 +86,7 @@ exports.proxyip = false;
+ 
+ // subprocesses - the number of child processes to use for various tasks.
+ //   Can be set to `0` instead of `{...}` to stop using subprocesses, if you're running out of RAM.
+-exports.subprocesses = {
+-	/**
+-	 * network - the number of networking child processes to spawn
+-	 *   This should be no greater than the number of threads available on your
+-	 *   server's CPU. If you're not sure how many you have, you can check from a
+-	 *   terminal by running:
+-	 *
+-	 *   $ node -e "console.log(require('os').cpus().length)"
+-	 *
+-	 *   Using more workers than there are available threads will cause performance
+-	 *   issues. Keeping a couple threads available for use for OS-related work and
+-	 *   other PS processes will likely give you the best performance, if your
+-	 *   server's CPU is capable of multithreading. If you don't know what any of
+-	 *   this means or you are unfamiliar with PS' networking code, leave this set
+-	 *   to 1.
+-	 */
+-	network: 1,
+-	/**
+-	 * for simulating battles
+-	 *   You should leave this at 1 unless your server has a very large
+-	 *   amount of traffic (i.e. hundreds of concurrent battles).
+-	 */
+-	simulator: 1,
+-
+-	// beyond this point, it'd be very weird if you needed more than one of each of these
+-
+-	/** for validating teams */
+-	validator: 1,
+-	/** for user authentication */
+-	verifier: 1,
+-	localartemis: 1,
+-	remoteartemis: 1,
+-	friends: 1,
+-	chatdb: 1,
+-	modlog: 1,
+-	pm: 1,
+-	/** for the battlesearch chat plugin */
+-	battlesearch: 1,
+-	/** datasearch - for the datasearch chat plugin */
+-	datasearch: 1,
+-};
++exports.subprocesses = 0;
+ 
+ /**
+  * Various debug options
+@@ -424,12 +384,12 @@ exports.watchconfig = true;
+ /**
+  * logchat - whether to log chat rooms.
+  */
+-exports.logchat = false;
++exports.logchat = true;
+ 
+ /**
+  * logchallenges - whether to log challenge battles. Useful for tournament servers.
+  */
+-exports.logchallenges = false;
++exports.logchallenges = true;
+ 
+ /**
+  * loguserstats - how often (in milliseconds) to write user stats to the
+@@ -460,7 +420,7 @@ exports.autolockdown = true;
+  * Logging in this way will make you considered an unregistered user and grant
+  * no authority. You cannot log into a trusted (g+/r%) user account this way.
+  */
+-exports.noguestsecurity = false;
++exports.noguestsecurity = true;
+ 
+ /**
+  * tourroom - specify a room to receive tournament announcements (defaults to
+@@ -773,3 +733,49 @@ exports.grouplist = [
+ 		punishgroup: 'MUTE',
+ 	},
+ ];
++
++/**
++ * customhttpresponse - added by foul-play-ish-aok's offline-showdown build.
++ *
++ * Auto-sends `/trn human` once the client has finished loading, so the
++ * browser lands in the lobby already named, with no console command
++ * needed. This only injects a <script> tag into the already-built client
++ * HTML at request time -- it never modifies any file on disk, and it does
++ * nothing to sprite/data loading or the server's connection target (both
++ * of those are set statically in the client's own config; see
++ * patches/showdown-client-testclient.patch).
++ */
++const fs = require('fs');
++const path = require('path');
++
++exports.customhttpresponse = function (req, res) {
++	const roomidRegex = /^\/(?:[A-Za-z0-9][A-Za-z0-9-]*)\/?(?:\?.*)?$/;
++	if (req.url !== '/' && !roomidRegex.test(req.url)) return false;
++
++	let html;
++	try {
++		html = fs.readFileSync(path.join(__dirname, '../server/static/testclient-new.html'), 'utf8');
++	} catch {
++		return false;
++	}
++
++	const injection = `
++<script>
++(function() {
++	var tries = 0;
++	var iv = setInterval(function() {
++		tries++;
++		if (window.PS && PS.send && PS.user && !PS.user.named) {
++			clearInterval(iv);
++			PS.send('/trn human');
++		} else if (tries > 200) {
++			clearInterval(iv);
++		}
++	}, 100);
++})();
++</script>`;
++
++	res.writeHead(200, { 'Content-Type': 'text/html; charset=UTF-8' });
++	res.end(html.includes('</body>') ? html.replace('</body>', injection + '</body>') : html + injection);
++	return true;
++};

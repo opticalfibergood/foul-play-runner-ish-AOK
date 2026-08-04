@@ -1,0 +1,140 @@
+name: Build offline foul-play + pokemon-showdown rootfs for iSH-AOK
+
+on:
+  # Rebuild every Monday. Since Alpine's own version is now pinned (see
+  # alpine_version below), this no longer pulls in new Alpine OS releases
+  # by itself -- it re-fetches fresh packages from the pinned branch's apk
+  # repo (rust/cargo/etc. still get their normal point updates) and rebuilds
+  # against whatever foul-play/pokemon-showdown/pokemon-showdown-client
+  # currently are on their respective *_REF. Scheduled runs have no
+  # workflow inputs, so they always use the default runner
+  # (ubuntu-24.04-arm) -- if this repo is private, either trigger via
+  # workflow_dispatch with a blacksmith-*-arm runner instead, or edit the
+  # fallback below.
+  schedule:
+    - cron: "17 6 * * 1"
+
+  # Manual "build me an update" button, with a couple of knobs.
+  workflow_dispatch:
+    inputs:
+      alpine_version:
+        description: >
+          Full Alpine version to build against, e.g. 3.23.3. Must be an
+          actual released version (dl-cdn.alpinelinux.org/alpine/v<major.minor>/
+          releases/<arch>/) -- this is not validated ahead of the download.
+        type: string
+        default: "3.23.3"
+      poke_engine_gen:
+        description: >
+          poke-engine generation feature to compile in. "default" keeps
+          whatever foul-play's requirements.txt already pins (currently
+          gen9 / terastallization).
+        type: choice
+        default: default
+        options:
+          - default
+          - gen1
+          - gen2
+          - gen3
+          - gen4
+          - gen5
+          - gen6
+          - gen7
+          - gen8
+          - gen9
+      foul_play_ref:
+        description: "foul-play git ref (branch, tag, or commit) to build"
+        type: string
+        default: main
+      showdown_ref:
+        description: "smogon/pokemon-showdown git ref to build"
+        type: string
+        default: master
+      client_ref:
+        description: "smogon/pokemon-showdown-client git ref to build"
+        type: string
+        default: master
+      runner:
+        description: >
+          Runner label. ubuntu-24.04-arm/ubuntu-22.04-arm are GitHub's own
+          free, native aarch64 hosted runners -- but ONLY on public repos
+          (they fail outright on private repos). If this repo is private,
+          pick a blacksmith-*-arm label instead (needs the Blacksmith
+          GitHub App installed; see README).
+        type: choice
+        default: ubuntu-24.04-arm
+        options:
+          - ubuntu-24.04-arm
+          - ubuntu-22.04-arm
+          - blacksmith-4vcpu-ubuntu-2404-arm
+          - blacksmith-2vcpu-ubuntu-2404-arm
+
+  # Lets you sanity-check changes to the build scripts/patches themselves
+  # without waiting for Monday. Does not publish a release.
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "patches/**"
+      - ".github/workflows/build-rootfs.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04-arm' }}
+    # Compiling the showdown server's TypeScript, running a full client
+    # build (which itself clones+builds a second throwaway server copy),
+    # and mirroring ~6000 small sprite/icon files adds real time over the
+    # foul-play-only build this started as -- budget generously.
+    timeout-minutes: 120
+    env:
+      ARCH: aarch64
+      ALPINE_VERSION: ${{ github.event.inputs.alpine_version || '3.23.3' }}
+      # Raw input passed through as-is (may be "default", a gen name, or
+      # unset on schedule/push runs); build-rootfs.sh normalizes "default"
+      # (and unset) to "" itself, since that's easier to get right in shell
+      # than in Actions' expression syntax.
+      POKE_ENGINE_GEN: ${{ github.event.inputs.poke_engine_gen }}
+      FOUL_PLAY_REF: ${{ github.event.inputs.foul_play_ref || 'main' }}
+      SHOWDOWN_REF: ${{ github.event.inputs.showdown_ref || 'master' }}
+      CLIENT_REF: ${{ github.event.inputs.client_ref || 'master' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the rootfs
+        run: sudo -E ./scripts/build-rootfs.sh
+
+      - name: Show artifact
+        run: |
+          ls -lh out/
+          cat out/BUILD_INFO.txt
+
+      - name: Compute build timestamp
+        id: ts
+        run: echo "value=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact (debugging / non-release runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: foul-play-showdown-offline-rootfs
+          path: out/*
+          retention-days: 14
+
+      - name: Publish / update release
+        if: github.event_name != 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rootfs-latest
+          # rootfs-latest is a fixed tag that gets edited in place on every
+          # run -- GitHub doesn't reliably surface an updated "published"
+          # date for an edited release, so the actual build time needs to
+          # be visible in the name itself, not just buried in the body.
+          name: "foul-play + offline pokemon-showdown rootfs for iSH-AOK (built ${{ steps.ts.outputs.value }})"
+          body_path: out/BUILD_INFO.txt
+          make_latest: true
+          files: |
+            out/*.tar.gz
+            out/*.sha256
+            out/BUILD_INFO.txt

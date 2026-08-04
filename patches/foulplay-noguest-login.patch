@@ -1,0 +1,35 @@
+diff --git a/fp/websocket_client.py b/fp/websocket_client.py
+index d49b726..4be7cb6 100644
+--- a/fp/websocket_client.py
++++ b/fp/websocket_client.py
+@@ -1,4 +1,5 @@
+ import asyncio
++import os
+ import websockets
+ import requests
+ import json
+@@ -92,6 +93,24 @@ class PSWebsocketClient:
+ 
+         guest_login = self.password is None
+ 
++        if guest_login and os.environ.get("FOUL_PLAY_NOGUEST_LOGIN") == "1":
++            # Set by this build's launcher when pointed at the bundled,
++            # offline Showdown server, which is started with
++            # `noguestsecurity = true` (see
++            # patches/showdown-server-config.patch). That setting is
++            # documented in config-example.js as accepting a bare,
++            # assertion-less `/trn NAME` with no login-server contact --
++            # which matters here since there is no login server to reach
++            # offline. Every other login path (a real password, or a guest
++            # login against the real production server) is untouched.
++            logger.info(
++                "FOUL_PLAY_NOGUEST_LOGIN=1: skipping login-server assertion"
++            )
++            message = ["/trn " + self.username]
++            await self.send_message("", message)
++            await asyncio.sleep(3)
++            return self.username
++
+         if guest_login:
+             response = requests.post(
+                 self.login_uri,
