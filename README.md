@@ -178,7 +178,14 @@ hoped-for.
   fine but crashes on the first request, because the static file server's
   root is intentionally a live directory outside `dist/` -- which is
   exactly why `server/static` specifically survives and gets replaced
-  with the built client).
+  with the built client -- as a real copy/move, not a symlink; a symlink
+  there was found not to resolve reliably through iSH-AOK's fakefs layer
+  on-device, even though it worked fine in a plain Linux sandbox. The
+  original stub's `404.html` is also copied into the new static
+  directory, since the client build has neither `404.html` nor
+  `index.html` of its own -- without that, `customhttpresponse` failing
+  to intercept a request for any reason crashes the server outright
+  instead of degrading to a normal 404).
 - **pokemon-showdown-client**: only the final built
   `play.pokemonshowdown.com/` static output is kept. Everything else --
   `node_modules`, `build-tools/`, the TypeScript `src/`, and critically

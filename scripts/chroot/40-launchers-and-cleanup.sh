@@ -44,7 +44,10 @@ done
 
 SERVER_PID=""
 BOT_PID=""
+CLEANED_UP=0
 cleanup() {
+	[ "\$CLEANED_UP" -eq 1 ] && return
+	CLEANED_UP=1
 	echo ""
 	echo "Stopping..."
 	[ -n "\$BOT_PID" ] && kill "\$BOT_PID" 2>/dev/null || true
@@ -68,11 +71,16 @@ echo "Waiting for it to come up..."
 tries=0
 until wget -q -T 2 -O /dev/null "http://localhost:\$PORT/" 2>/dev/null; do
 	tries=\$((tries + 1))
-	if [ "\$tries" -gt 120 ]; then
-		echo "error: server did not come up after 60s" >&2
+	if [ "\$tries" -gt 600 ]; then
+		echo "error: server did not come up after 300s" >&2
 		exit 1
 	fi
 	kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
+	# 600 tries at 0.5s each is a long silent wait -- say something every
+	# ~10s so this doesn't look hung.
+	if [ "\$((tries % 20))" -eq 0 ]; then
+		echo "  ...still waiting (\$((tries / 2))s)"
+	fi
 	sleep 0.5
 done
 echo "Server is up: http://localhost:\$PORT"
@@ -104,8 +112,8 @@ $(cat /opt/foul-play/BUILD_INFO.txt)
 $(cat /opt/pokemon-showdown/BUILD_INFO.txt)
 
 === pokemon-showdown-client (offline static client + mirrored sprites) ===
-$(cat /opt/pokemon-showdown-client-static/BUILD_INFO.txt)
-$(cat /opt/pokemon-showdown-client-static/SPRITE_MIRROR_INFO.txt)
+$(cat /opt/pokemon-showdown/server/static/BUILD_INFO.txt)
+$(cat /opt/pokemon-showdown/server/static/SPRITE_MIRROR_INFO.txt)
 
 alpine version: $(cat /etc/alpine-release)
 node version: $(node --version)
@@ -138,6 +146,6 @@ echo "==> Writing default resolv.conf (the one build-rootfs.sh borrowed was the 
 printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' > /etc/resolv.conf
 
 echo "==> Final size report"
-du -sh /opt/foul-play /opt/pokemon-showdown /opt/pokemon-showdown-client-static 2>/dev/null || true
+du -sh /opt/foul-play /opt/pokemon-showdown 2>/dev/null || true
 
 echo "==> 40-launchers-and-cleanup.sh finished"

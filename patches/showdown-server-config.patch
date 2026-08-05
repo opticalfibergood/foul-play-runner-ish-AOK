@@ -1,5 +1,5 @@
 diff --git a/config/config.js b/config/config.js
-index 8289fe3..cbf95f1 100644
+index 8289fe3..984c9aa 100644
 --- a/config/config.js
 +++ b/config/config.js
 @@ -86,47 +86,7 @@ exports.proxyip = false;
@@ -75,7 +75,7 @@ index 8289fe3..cbf95f1 100644
  
  /**
   * tourroom - specify a room to receive tournament announcements (defaults to
-@@ -773,3 +733,49 @@ exports.grouplist = [
+@@ -773,3 +733,56 @@ exports.grouplist = [
  		punishgroup: 'MUTE',
  	},
  ];
@@ -101,7 +101,14 @@ index 8289fe3..cbf95f1 100644
 +	let html;
 +	try {
 +		html = fs.readFileSync(path.join(__dirname, '../server/static/testclient-new.html'), 'utf8');
-+	} catch {
++	} catch (err) {
++		// Deliberately loud: a silent fallthrough here previously led to a
++		// confusing, unrelated-looking crash further downstream (the
++		// generic static file server has no 404.html of its own to fall
++		// back to -- see 30-showdown-client.sh for the fix to that part).
++		// If this ever fires, the actual reason (missing file? bad
++		// symlink/path resolution?) should be visible here instead.
++		console.error('customhttpresponse: could not read testclient-new.html:', err.message);
 +		return false;
 +	}
 +

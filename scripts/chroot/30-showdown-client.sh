@@ -88,23 +88,43 @@ CLIENT_VERSION_FILE=/opt/pokemon-showdown-client-static/version.txt
 [ -f "$CLIENT_VERSION_FILE" ] || echo "unknown" > "$CLIENT_VERSION_FILE"
 
 echo "==> Merging into the server: server/static -> the built client"
-mv /opt/pokemon-showdown/server/static /opt/pokemon-showdown/server/static-stub
-ln -s /opt/pokemon-showdown-client-static /opt/pokemon-showdown/server/static
+# A real move/copy, not a symlink. server/static previously being a
+# symlink is suspected of not resolving reliably through iSH-AOK's fakefs
+# layer (the same SQLite-backed metadata shim that stands in for POSIX
+# semantics APFS doesn't have -- a known fragile corner, same general
+# category of issue as the fd-passing problems that motivated
+# subprocesses=0 in the first place). A real directory removes that
+# question entirely rather than relying on it working. Costs some extra
+# disk (one copy of the built client, already present anyway) in exchange
+# for one less thing to trust.
+#
+# Also: the client build has neither 404.html nor index.html of its own
+# (confirmed directly -- play.pokemonshowdown.com/ ships neither), so
+# StaticServer's own fallback-for-missing-file path would have nothing to
+# serve if customhttpresponse doesn't intercept a given request for any
+# reason. Copying the *original* server/static's 404.html/index.html in
+# means that path can degrade to an actual 404 response instead of
+# crashing outright, regardless of why customhttpresponse didn't catch
+# the request.
+cp /opt/pokemon-showdown/server/static/404.html /opt/pokemon-showdown-client-static/404.html
+cp /opt/pokemon-showdown/server/static/index.html /opt/pokemon-showdown-client-static/index.html.stub-fallback
+rm -rf /opt/pokemon-showdown/server/static
+mv /opt/pokemon-showdown-client-static /opt/pokemon-showdown/server/static
 
 echo "==> Removing the entire pokemon-showdown-client repo checkout"
 echo "    (node_modules, caches/pokemon-showdown [a full second copy of the"
 echo "    server, build-only], build-tools/, TS src/, and everything else"
 echo "    outside play.pokemonshowdown.com/ was only ever needed to produce"
-echo "    the static output already moved out above)"
+echo "    the static output already moved into place above)"
 cd /
 rm -rf /opt/pokemon-showdown-client
 
-cat > /opt/pokemon-showdown-client-static/BUILD_INFO.txt <<EOF
+cat > /opt/pokemon-showdown/server/static/BUILD_INFO.txt <<EOF
 pokemon-showdown-client ref: $CLIENT_REF
 pokemon-showdown-client commit: $CLIENT_COMMIT
 patched: testclient-new.html (patches/showdown-client-testclient.patch)
 sprite mirror: see SPRITE_MIRROR_INFO.txt in this same directory
 EOF
-cat /opt/pokemon-showdown-client-static/BUILD_INFO.txt
+cat /opt/pokemon-showdown/server/static/BUILD_INFO.txt
 
 echo "==> 30-showdown-client.sh finished"
