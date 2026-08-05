@@ -58,11 +58,18 @@ node pokemon-showdown start --skip-build "\$PORT" &
 SERVER_PID=\$!
 
 echo "Waiting for it to come up..."
+# The server's own "Worker N now listening" line prints right after
+# calling .listen(), not after the async 'listening' event actually
+# fires (confirmed directly in pokemon-showdown's server/sockets.ts) --
+# so it genuinely isn't ready to accept connections the moment that's
+# printed. How long the real gap is depends on iSH-AOK's syscall
+# emulation, which is why this polls rather than trusting the log line,
+# and why the budget is generous.
 tries=0
-until wget -q -O /dev/null "http://localhost:\$PORT/" 2>/dev/null; do
+until wget -q -T 2 -O /dev/null "http://localhost:\$PORT/" 2>/dev/null; do
 	tries=\$((tries + 1))
-	if [ "\$tries" -gt 60 ]; then
-		echo "error: server did not come up after 30s" >&2
+	if [ "\$tries" -gt 120 ]; then
+		echo "error: server did not come up after 60s" >&2
 		exit 1
 	fi
 	kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
