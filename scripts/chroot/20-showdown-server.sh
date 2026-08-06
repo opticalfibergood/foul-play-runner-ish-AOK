@@ -68,10 +68,17 @@ if (!m) throw new Error('could not find the injected <script> block in customhtt
 require('fs').writeFileSync('/tmp/injected-script-check.js', m[1]);
 require('child_process').execFileSync('node', ['--check', '/tmp/injected-script-check.js']);
 console.log('  injected browser script syntax OK');
-if (!m[1].includes('PS.server.protocol') || !m[1].includes('PS.connection.reconnect()')) {
-    throw new Error('injected script is missing the PS.server.protocol/reconnect fix');
+// The protocol fix itself now lives client-side (a Worker.postMessage
+// wrap in testclient-new.html, applied before client-connection.js ever
+// loads -- see showdown-client-testclient.patch and its verification in
+// scripts/verify-testclient-html.js). This script's only remaining job
+// is the auto-login, and it must wait for an actual connection rather
+// than firing blind -- otherwise the send can race a not-yet-open
+// socket and get silently dropped.
+if (!m[1].includes(\"PS.connection.connected\") || !m[1].includes(\"PS.send('/trn human')\")) {
+    throw new Error('injected script is missing the connected-gated /trn human auto-login');
 }
-console.log('  injected browser script contains the protocol fix: OK');
+console.log('  injected browser script contains the gated auto-login: OK');
 "
 
 echo "==> npm prune (drop devDependencies: typescript, eslint, mocha, ...)"

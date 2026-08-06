@@ -84,6 +84,36 @@ if (/<script src="https:\/\/play\.pokemonshowdown\.com\/config\/config\.js">/.te
 	failed = true;
 }
 
+// The reconnect-race fix: PSServer.protocol must be corrected *before*
+// the connection worker's first 'connect' message, or the worker starts
+// a real, doomed wss:// attempt against the plain http server, and a
+// later forced disconnect+reconnect races that attempt's own async
+// onclose handler (which unconditionally clobbers the worker's shared
+// socket reference) -- producing an endless connect/disconnect loop.
+// So this checks two things, not just one string's presence: the
+// wrapper exists, AND it appears strictly before client-connection.js
+// is loaded.
+const workerWrapIdx = html.indexOf('window.Worker = function');
+const clientConnectionIdx = html.indexOf('<script src="js/client-connection.js">');
+if (workerWrapIdx === -1) {
+	console.error('  FAIL: no Worker.postMessage protocol-fix wrapper found in testclient-new.html');
+	failed = true;
+} else if (clientConnectionIdx === -1) {
+	console.error('  FAIL: could not find the client-connection.js script tag to check ordering against');
+	failed = true;
+} else if (workerWrapIdx > clientConnectionIdx) {
+	console.error('  FAIL: Worker wrapper is injected AFTER client-connection.js loads -- too late, the race is back');
+	failed = true;
+} else {
+	console.log('  Worker protocol-fix wrapper present and correctly ordered before client-connection.js');
+}
+// And that it actually does the one thing that matters: forces the
+// protocol on outgoing 'connect' messages before they reach the worker.
+if (!/msg\.server\.protocol\s*=\s*['"]http['"]/.test(html)) {
+	console.error("  FAIL: Worker wrapper doesn't appear to force server.protocol = 'http' on connect messages");
+	failed = true;
+}
+
 if (failed) {
 	console.error('error: testclient-new.html failed verification');
 	process.exit(1);
