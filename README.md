@@ -94,11 +94,34 @@ port number for plain-`http` connections -- two contradictory
 requirements from one input, so no static `Config` value gets both right
 at once. `testclient-new.html`'s static patch alone leaves `protocol`
 wrongly set to `'https'`, which tries to open a secure WebSocket against
-a plain HTTP server and just sits on "Disconnected." Confirmed directly
-against `client-main.ts`/`client-connection.ts`, and verified with a
-mock of the real `PS` object showing the fix flips `protocol` to `http`,
-triggers `PS.connection.reconnect()`, and sends `/trn human` exactly
-once.
+a plain HTTP server and just sits on "Disconnected."
+
+Fixing `protocol` alone isn't quite enough, though: the client's actual
+connection logic runs inside a Web Worker
+(`client-connection-worker.js`), and that worker's `connectToServer()`
+no-ops (`if (socket) return`) while it's still holding a reference to
+whatever connection attempt is already in flight -- and by the time our
+injected script can possibly run (document order puts it after
+everything else on the page), the page's own *first* connection attempt,
+made with the wrong protocol, has already started. A plain
+`PS.connection.reconnect()` call can get silently ignored for as long as
+that stale, doomed-to-fail attempt takes to time out on its own -- which
+is exactly the "tries for a bit, then gets stuck before retrying"
+symptom this produced before the fix below. So the injected script also
+explicitly tells the worker to drop the stale attempt
+(`worker.postMessage({ type: 'disconnect' })`) *before* reconnecting;
+worker `postMessage` calls are processed in the order they're sent, so
+this is guaranteed to land before the follow-up `connect` message.
+
+All of this was confirmed directly against the real source
+(`client-main.ts`, `client-connection.ts`, `client-connection-worker.ts`)
+and verified two ways: a raw `curl` WebSocket-upgrade probe against a
+real running (patched) server confirming the server side was never the
+problem (`101 Switching Protocols` with the correct
+`Sec-WebSocket-Accept`), and a mock of the real `PS`/`PS.connection`
+object confirming the injected script's actual call order --
+`worker.postMessage('disconnect')` then `reconnect()` then `/trn
+human` -- and resulting state.
 
 ## Sprites and icons
 
