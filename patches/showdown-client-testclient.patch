@@ -1,5 +1,5 @@
 diff --git a/play.pokemonshowdown.com/testclient-new.html b/play.pokemonshowdown.com/testclient-new.html
-index d36feae..96a2af3 100644
+index d36feae..e990ae0 100644
 --- a/play.pokemonshowdown.com/testclient-new.html
 +++ b/play.pokemonshowdown.com/testclient-new.html
 @@ -16,7 +16,7 @@
@@ -47,16 +47,49 @@ index d36feae..96a2af3 100644
  					registered: true
  				},
  				customcolors: {}
-@@ -111,7 +111,7 @@
+@@ -110,8 +110,40 @@
+ 	<script src="js/battle-text-parser.js"></script>
  	<script src="js/client-main.js"></script>
  	<script nomodule src="js/lib/sockjs-1.4.0-nwjsfix.min.js"></script>
++	<script>
++		// offline-showdown build: PSServer.protocol is derived from
++		// Config.defaultserver.httpport's truthiness ('https' whenever
++		// httpport is set, since that field also doubles as the port
++		// number for the 'http' branch -- no single static Config value
++		// gets both right at once). Fixing PS.server.protocol *after*
++		// client-connection.js has already run is too late: it creates
++		// the worker and fires off a real (wrong-protocol) connection
++		// attempt as soon as it loads, and forcing a disconnect+reconnect
++		// afterwards races that still-in-flight socket's own async
++		// onclose handler, which unconditionally clobbers the worker's
++		// shared connection-state variable -- producing exactly a loop of
++		// spurious connect/disconnect cycles that may never settle.
++		// Instead, wrap Worker so the very *first* 'connect' message the
++		// worker ever receives already carries the corrected protocol;
++		// there is then no bad connection to race against at all.
++		(function() {
++			var OrigWorker = window.Worker;
++			if (!OrigWorker) return;
++			window.Worker = function(url) {
++				var worker = new OrigWorker(url);
++				var origPostMessage = worker.postMessage.bind(worker);
++				worker.postMessage = function(msg) {
++					if (msg && msg.type === 'connect' && msg.server) {
++						msg.server.protocol = 'http';
++					}
++					return origPostMessage(msg);
++				};
++				return worker;
++			};
++		})();
++	</script>
  	<script src="js/client-connection.js"></script>
 -	<script> Net.defaultRoute = 'https://play.pokemonshowdown.com'; </script>
 +	<script> Net.defaultRoute = 'http://localhost:8000'; </script>
  
  	<script src="js/lib/preact.min.js"></script>
  	<script src="js/panels.js"></script>
-@@ -159,8 +159,8 @@
+@@ -159,8 +191,8 @@
  	<script src="js/battle-team-editor.js?"></script>
  	<script src="js/panel-teambuilder-team.js?"></script>
  
