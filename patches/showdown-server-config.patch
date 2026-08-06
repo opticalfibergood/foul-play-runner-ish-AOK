@@ -1,5 +1,5 @@
 diff --git a/config/config.js b/config/config.js
-index 8289fe3..00e704f 100644
+index 8289fe3..d72b8b1 100644
 --- a/config/config.js
 +++ b/config/config.js
 @@ -86,47 +86,7 @@ exports.proxyip = false;
@@ -75,7 +75,7 @@ index 8289fe3..00e704f 100644
  
  /**
   * tourroom - specify a room to receive tournament announcements (defaults to
-@@ -773,3 +733,64 @@ exports.grouplist = [
+@@ -773,3 +733,86 @@ exports.grouplist = [
  		punishgroup: 'MUTE',
  	},
  ];
@@ -115,18 +115,40 @@ index 8289fe3..00e704f 100644
 +	const injection = `
 +<script>
 +(function() {
-+	// The protocol fix (PSServer.protocol vs. Config.defaultserver.httpport's
-+	// truthiness -- see showdown-client-testclient.patch) now happens
-+	// *before* the connection worker's first 'connect' message, via a
-+	// Worker.postMessage wrapper injected ahead of client-connection.js.
-+	// That means the very first connection attempt already succeeds and
-+	// there's no bad in-flight socket left to fight with here -- this
-+	// script now only has one job: send '/trn human' once the client is
-+	// actually connected and not yet named.
++	// This used to also force PS.server.protocol to 'http' and explicitly
++	// disconnect+reconnect the connection worker at runtime, to work around
++	// PSServer.protocol being wrongly derived to 'https' whenever
++	// Config.defaultserver.httpport is truthy. That's no longer needed:
++	// patches/showdown-client-testclient.patch now sets httpport to 0
++	// (falsy) in the embedded Config, so protocol computes to 'http'
++	// correctly the moment PSServer is constructed -- there's no wrong
++	// first connection attempt to correct anymore.
++	//
++	// The runtime disconnect+reconnect approach turned out to be actively
++	// harmful, not just unnecessary: calling socket.close() on a still-
++	// CONNECTING WebSocket doesn't close it synchronously -- per spec, the
++	// resulting 'close' event is queued and fires *asynchronously*, i.e.
++	// after the immediately-following reconnect() call had already created
++	// a brand new socket. client-connection-worker.ts's onclose handler
++	// unconditionally nulls out its shared, module-level socket variable
++	// with no check that the event it's handling still belongs to the
++	// current socket -- so that stale, delayed close event would wipe out
++	// the reference to the brand new (possibly already-connected!) socket
++	// and schedule a spurious reconnect on top of it, over and over. That
++	// was the actual mechanism behind "tries to connect over and over and
++	// never works": this script, not the server or foul-play.
 +	var tries = 0;
 +	var iv = setInterval(function() {
 +		tries++;
-+		if (window.PS && PS.send && PS.connection && PS.connection.connected && PS.user && !PS.user.named) {
++		// Safety net only, for the rare case the connection worker fails to
++		// start and the client falls back to its direct (non-worker)
++		// connection path: that path derives its port from httpport
++		// specifically, which is now 0. This is a plain data correction
++		// with no socket/timer side effects -- it doesn't touch any
++		// in-flight connection -- so unlike the old disconnect+reconnect
++		// dance it can't race with anything.
++		if (window.PS && PS.server) PS.server.httpport = PS.server.port;
++		if (window.PS && PS.send && PS.user && !PS.user.named) {
 +			clearInterval(iv);
 +			PS.send('/trn human');
 +		} else if (tries > 200) {
