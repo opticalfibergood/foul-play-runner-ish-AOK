@@ -1,5 +1,5 @@
 diff --git a/config/config.js b/config/config.js
-index 8289fe3..984c9aa 100644
+index 8289fe3..4fc6893 100644
 --- a/config/config.js
 +++ b/config/config.js
 @@ -86,47 +86,7 @@ exports.proxyip = false;
@@ -75,7 +75,7 @@ index 8289fe3..984c9aa 100644
  
  /**
   * tourroom - specify a room to receive tournament announcements (defaults to
-@@ -773,3 +733,56 @@ exports.grouplist = [
+@@ -773,3 +733,69 @@ exports.grouplist = [
  		punishgroup: 'MUTE',
  	},
  ];
@@ -116,8 +116,21 @@ index 8289fe3..984c9aa 100644
 +<script>
 +(function() {
 +	var tries = 0;
++	var fixedProtocol = false;
 +	var iv = setInterval(function() {
 +		tries++;
++		// PSServer.protocol is wrongly derived to 'https' whenever
++		// Config.defaultserver.httpport is truthy (needed so the 'http'
++		// branch has a real port number to use) -- there is no single
++		// static Config value that gets both protocol and the port right
++		// at once, so this has to be fixed as a runtime mutation after
++		// PSServer is constructed. See patches/showdown-server-config.patch
++		// and showdown-client-testclient.patch for the fuller story.
++		if (!fixedProtocol && window.PS && PS.server && PS.connection) {
++			fixedProtocol = true;
++			PS.server.protocol = 'http';
++			PS.connection.reconnect();
++		}
 +		if (window.PS && PS.send && PS.user && !PS.user.named) {
 +			clearInterval(iv);
 +			PS.send('/trn human');

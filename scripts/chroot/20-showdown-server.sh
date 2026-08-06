@@ -56,6 +56,22 @@ assertEq('logchat', c.logchat, true);
 assertEq('logchallenges', c.logchallenges, true);
 if (typeof c.customhttpresponse !== 'function') throw new Error('customhttpresponse is not a function');
 console.log('  config.customhttpresponse is a function: OK');
+
+// The injected <script> is browser JS embedded as a template string inside
+// this Node file -- node --check on config.js itself doesn't touch that
+// string's own syntax at all, so extract and check it separately. This is
+// what would have caught a typo in the injected script before it ever
+// reached a real browser.
+const fnSrc = c.customhttpresponse.toString();
+const m = fnSrc.match(/<script>\n([\s\S]*?)\n<\/script>/);
+if (!m) throw new Error('could not find the injected <script> block in customhttpresponse');
+require('fs').writeFileSync('/tmp/injected-script-check.js', m[1]);
+require('child_process').execFileSync('node', ['--check', '/tmp/injected-script-check.js']);
+console.log('  injected browser script syntax OK');
+if (!m[1].includes('PS.server.protocol') || !m[1].includes('PS.connection.reconnect()')) {
+    throw new Error('injected script is missing the PS.server.protocol/reconnect fix');
+}
+console.log('  injected browser script contains the protocol fix: OK');
 "
 
 echo "==> npm prune (drop devDependencies: typescript, eslint, mocha, ...)"

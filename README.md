@@ -81,10 +81,24 @@ below if you want to check.
    offline story that has to happen over the network, and it happens in
    CI, never on-device.
 
-The server also auto-logs the browser in as `human` (a small
-`customhttpresponse` hook in `config.js` that waits for the client to
-finish loading, then sends `/trn human`) so there's no console command to
-type -- `http://localhost:8000`, bare, just works.
+The server also fixes up the browser's connection at runtime, via the
+same `customhttpresponse` hook in `config.js`: once the client has
+loaded, it corrects `PS.server.protocol` and forces an immediate
+reconnect, then sends `/trn human` so there's no console command to type
+-- `http://localhost:8000`, bare, just works. The protocol fix is needed
+because of a genuine quirk in the client's own source: `PSServer`'s
+`protocol` field is derived from `Config.defaultserver.httpport`'s
+*truthiness* at construction time (`Config.defaultserver.httpport ?
+'https' : 'http'`), while that same field is *also* used as the literal
+port number for plain-`http` connections -- two contradictory
+requirements from one input, so no static `Config` value gets both right
+at once. `testclient-new.html`'s static patch alone leaves `protocol`
+wrongly set to `'https'`, which tries to open a secure WebSocket against
+a plain HTTP server and just sits on "Disconnected." Confirmed directly
+against `client-main.ts`/`client-connection.ts`, and verified with a
+mock of the real `PS` object showing the fix flips `protocol` to `http`,
+triggers `PS.connection.reconnect()`, and sends `/trn human` exactly
+once.
 
 ## Sprites and icons
 
