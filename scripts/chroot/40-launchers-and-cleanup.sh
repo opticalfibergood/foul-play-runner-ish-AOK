@@ -59,8 +59,28 @@ echo "Starting pokemon-showdown on port \$PORT..."
 cd /opt/pokemon-showdown
 node pokemon-showdown start --skip-build "\$PORT" &
 SERVER_PID=\$!
-sleep 3
-kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died immediately" >&2; exit 1; }
+
+# Wait for the port to actually accept TCP connections before ever
+# launching foul-play. A bare TCP connect is a much cheaper/more reliable
+# readiness probe than an HTTP GET here: unlike wget, it never touches
+# customhttpresponse or any sockjs/HTTP request-handling code, so it can't
+# be fooled by that -- it only confirms .listen() has actually completed.
+# (Loading the sim/Dex data before pokemon-showdown ever calls .listen()
+# routinely takes longer than a fixed 3s sleep on real ish-AOK hardware,
+# which is what made the old sleep-3-then-kill-0 check unreliable: it only
+# proved the node process hadn't crashed, not that it was accepting
+# connections yet, so foul-play's first launch attempt would race and lose.)
+echo "Waiting for pokemon-showdown to start listening on port \$PORT..."
+i=0
+until nc -z 127.0.0.1 "\$PORT" 2>/dev/null; do
+	kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died immediately" >&2; exit 1; }
+	i=\$((i + 1))
+	if [ "\$i" -ge 60 ]; then
+		echo "error: server did not start listening within 60s" >&2
+		exit 1
+	fi
+	sleep 1
+done
 echo "Server starting in the background: http://localhost:\$PORT"
 
 if [ "\$START_BOT" -eq 1 ]; then
