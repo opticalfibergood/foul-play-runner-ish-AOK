@@ -59,55 +59,57 @@ echo "Starting pokemon-showdown on port \$PORT..."
 cd /opt/pokemon-showdown
 node pokemon-showdown start --skip-build "\$PORT" &
 SERVER_PID=\$!
-
-echo "Waiting for it to come up..."
-# The server's own "Worker N now listening" line prints right after
-# calling .listen(), not after the async 'listening' event actually
-# fires -- so it isn't necessarily ready the moment that's printed.
-#
-# On real iSH-AOK hardware, individual requests can genuinely take much
-# longer than on a normal machine to actually complete (not fail outright
-# -- just slow, likely from synchronous file reads going through iSH's
-# fakefs layer under JIT-emulated syscalls) before the server settles.
-# A short per-attempt wget timeout previously caused *every single
-# attempt* to fail for this reason alone, regardless of how many times
-# it retried -- confirmed on a real device where the browser eventually
-# connected (after several manual reloads) while this loop kept failing
-# the whole time on a much shorter per-attempt budget. So: a generous
-# per-attempt timeout, and the overall budget is tracked against real
-# wall-clock time rather than a fixed attempt count, since one slow
-# attempt can itself now take much longer than a fixed polling interval
-# would assume.
-START_TIME=\$(date +%s)
-BUDGET=600
-LAST_PROGRESS=0
-while true; do
-	if wget -q -T 20 -O /dev/null "http://localhost:\$PORT/" 2>/dev/null; then
-		break
-	fi
-	kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
-	NOW=\$(date +%s)
-	ELAPSED=\$((NOW - START_TIME))
-	if [ "\$ELAPSED" -ge "\$BUDGET" ]; then
-		echo "error: server did not come up after \${BUDGET}s" >&2
-		exit 1
-	fi
-	if [ "\$((ELAPSED - LAST_PROGRESS))" -ge 10 ]; then
-		LAST_PROGRESS=\$ELAPSED
-		echo "  ...still waiting (\${ELAPSED}s)"
-	fi
-	sleep 1
-done
-echo "Server is up: http://localhost:\$PORT"
+sleep 3
+kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died immediately" >&2; exit 1; }
+echo "Server starting in the background: http://localhost:\$PORT"
 
 if [ "\$START_BOT" -eq 1 ]; then
-	echo "Starting foul-play (--bot-mode \$BOT_MODE, --pokemon-format \$FORMAT)..."
-	FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
-		--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
-		--ps-username bot \\
-		--bot-mode "\$BOT_MODE" \\
-		--pokemon-format "\$FORMAT" &
-	BOT_PID=\$!
+	echo "Waiting for foul-play to connect (--bot-mode \$BOT_MODE, --pokemon-format \$FORMAT)..."
+	# Earlier versions of this script polled the server with wget before
+	# ever starting the bot. That was checking the wrong thing: on real
+	# iSH-AOK hardware a plain HTTP GET can behave very differently from
+	# an actual WebSocket connection attempt (customhttpresponse's
+	# synchronous file read alone was enough to make wget an unreliable
+	# proxy -- confirmed directly: wget kept failing for 200s+ of real
+	# wall-clock time while the browser successfully connected through
+	# the same server in the meantime). foul-play connecting is the only
+	# thing that actually matters here, so let IT be the readiness check.
+	#
+	# run.py re-raises any exception after logging it (confirmed directly
+	# in foul-play's own source) -- including a failed initial
+	# websockets.connect() -- so the process exits promptly on a failed
+	# connection attempt and keeps running once genuinely connected. That
+	# gives a clean, real signal to retry on: launch it, and if it's
+	# still alive a few seconds later, it connected.
+	START_TIME=\$(date +%s)
+	BUDGET=600
+	LAST_PROGRESS=0
+	while true; do
+		FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
+			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
+			--ps-username bot \\
+			--bot-mode "\$BOT_MODE" \\
+			--pokemon-format "\$FORMAT" &
+		BOT_PID=\$!
+		sleep 8
+		if kill -0 "\$BOT_PID" 2>/dev/null; then
+			echo "foul-play connected."
+			break
+		fi
+		wait "\$BOT_PID" 2>/dev/null || true
+		kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
+		NOW=\$(date +%s)
+		ELAPSED=\$((NOW - START_TIME))
+		if [ "\$ELAPSED" -ge "\$BUDGET" ]; then
+			echo "error: foul-play could not connect after \${BUDGET}s" >&2
+			exit 1
+		fi
+		if [ "\$((ELAPSED - LAST_PROGRESS))" -ge 10 ]; then
+			LAST_PROGRESS=\$ELAPSED
+			echo "  ...still trying (\${ELAPSED}s)"
+		fi
+		sleep 2
+	done
 fi
 
 echo ""
