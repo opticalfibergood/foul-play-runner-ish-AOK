@@ -83,6 +83,26 @@ until nc -z 127.0.0.1 "\$PORT" 2>/dev/null; do
 done
 echo "Server starting in the background: http://localhost:\$PORT"
 
+# websockets.connect()'s default open_timeout is 10s (confirmed in the
+# vendored library's asyncio/client.py) -- foul-play's first connection
+# attempt races that clock against pokemon-showdown's synchronous startup
+# work (chatroom restore, Dex loading, etc.), which can still be running
+# well after the port above starts accepting TCP connections. A
+# .listen()'d socket takes the handshake into the kernel backlog right
+# away even if node hasn't gotten around to answering it yet, so the
+# process can look "alive" for a while before it actually connects, or
+# before it times out and dies.
+CONNECT_CHECK_DELAY=15
+
+launch_bot() {
+	FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
+		--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
+		--ps-username bot \\
+		--bot-mode "\$BOT_MODE" \\
+		--pokemon-format "\$FORMAT" &
+	BOT_PID=\$!
+}
+
 if [ "\$START_BOT" -eq 1 ]; then
 	echo "Waiting for foul-play to connect (--bot-mode \$BOT_MODE, --pokemon-format \$FORMAT)..."
 	# Earlier versions of this script polled the server with wget before
@@ -100,18 +120,20 @@ if [ "\$START_BOT" -eq 1 ]; then
 	# websockets.connect() -- so the process exits promptly on a failed
 	# connection attempt and keeps running once genuinely connected. That
 	# gives a clean, real signal to retry on: launch it, and if it's
-	# still alive a few seconds later, it connected.
+	# still alive a bit later, it connected.
+	#
+	# NOTE: CONNECT_CHECK_DELAY is comfortably past the library's 10s
+	# open_timeout, but a single point-in-time check like this is
+	# inherently racy no matter what number is picked here -- the real
+	# protection against this timeout (and any later crash) is the
+	# supervision loop below, which keeps watching for the rest of the
+	# session instead of checking once and walking away.
 	START_TIME=\$(date +%s)
 	BUDGET=600
 	LAST_PROGRESS=0
 	while true; do
-		FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
-			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
-			--ps-username bot \\
-			--bot-mode "\$BOT_MODE" \\
-			--pokemon-format "\$FORMAT" &
-		BOT_PID=\$!
-		sleep 8
+		launch_bot
+		sleep "\$CONNECT_CHECK_DELAY"
 		if kill -0 "\$BOT_PID" 2>/dev/null; then
 			echo "foul-play connected."
 			break
@@ -136,7 +158,30 @@ echo ""
 echo "Open the Browser tool in ish-AOK and go to: http://localhost:\$PORT"
 echo "You'll be auto-named 'human'. Challenge 'bot' to a \$FORMAT battle."
 echo "Ctrl-C here stops everything."
-wait
+
+if [ "\$START_BOT" -eq 1 ]; then
+	# A plain \`wait\` here would block until the first background job exits
+	# and then fall straight through to cleanup/exit -- silently ending the
+	# session if foul-play dies later (this same handshake-timeout race can
+	# in principle strike again after we've already declared victory once,
+	# and a real crash mid-battle is possible too). Supervise both
+	# processes for the rest of the run instead: the server dying is
+	# fatal, but foul-play dying gets auto-restarted so the bot doesn't
+	# just sit there OFFLINE.
+	while true; do
+		[ "\$CLEANED_UP" -eq 1 ] && break
+		kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
+		if ! kill -0 "\$BOT_PID" 2>/dev/null; then
+			wait "\$BOT_PID" 2>/dev/null || true
+			[ "\$CLEANED_UP" -eq 1 ] && break
+			echo "foul-play disconnected/crashed -- restarting..."
+			launch_bot
+		fi
+		sleep 3
+	done
+else
+	wait
+fi
 EOS
 chmod +x /usr/local/bin/start-showdown
 
