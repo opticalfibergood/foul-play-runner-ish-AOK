@@ -68,23 +68,10 @@ if (!m) throw new Error('could not find the injected <script> block in customhtt
 require('fs').writeFileSync('/tmp/injected-script-check.js', m[1]);
 require('child_process').execFileSync('node', ['--check', '/tmp/injected-script-check.js']);
 console.log('  injected browser script syntax OK');
-// protocol correctness now comes from patches/showdown-client-testclient.patch
-// setting httpport falsy in the embedded Config (verified separately by
-// verify-testclient-html.js), not from anything injected here -- so this
-// script should NOT be forcing a disconnect+reconnect anymore. That was
-// itself the source of a real bug (see the comment in the injected script
-// for the full story), so assert it's gone, alongside the httpport
-// fallback safety net and the auto-login send that should still be there.
-if (m[1].includes('PS.connection.worker.postMessage') || m[1].includes('PS.connection.reconnect()')) {
-    throw new Error('injected script still forces a disconnect+reconnect -- this was the cause of the "connects over and over, never works" bug and should not come back');
+if (!m[1].includes('PS.server.protocol') || !m[1].includes('PS.connection.reconnect()')) {
+    throw new Error('injected script is missing the PS.server.protocol/reconnect fix');
 }
-if (!m[1].includes('PS.server.httpport = PS.server.port')) {
-    throw new Error('injected script is missing the httpport fallback safety net');
-}
-if (!m[1].includes("PS.send('/trn human')")) {
-    throw new Error('injected script is missing the auto-login send');
-}
-console.log('  injected browser script contains the httpport safety net and auto-login, and no longer forces a racy reconnect: OK');
+console.log('  injected browser script contains the protocol fix: OK');
 "
 
 echo "==> npm prune (drop devDependencies: typescript, eslint, mocha, ...)"

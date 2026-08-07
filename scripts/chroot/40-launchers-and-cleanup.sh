@@ -63,25 +63,40 @@ SERVER_PID=\$!
 echo "Waiting for it to come up..."
 # The server's own "Worker N now listening" line prints right after
 # calling .listen(), not after the async 'listening' event actually
-# fires (confirmed directly in pokemon-showdown's server/sockets.ts) --
-# so it genuinely isn't ready to accept connections the moment that's
-# printed. How long the real gap is depends on iSH-AOK's syscall
-# emulation, which is why this polls rather than trusting the log line,
-# and why the budget is generous.
-tries=0
-until wget -q -T 2 -O /dev/null "http://localhost:\$PORT/" 2>/dev/null; do
-	tries=\$((tries + 1))
-	if [ "\$tries" -gt 600 ]; then
-		echo "error: server did not come up after 300s" >&2
-		exit 1
+# fires -- so it isn't necessarily ready the moment that's printed.
+#
+# On real iSH-AOK hardware, individual requests can genuinely take much
+# longer than on a normal machine to actually complete (not fail outright
+# -- just slow, likely from synchronous file reads going through iSH's
+# fakefs layer under JIT-emulated syscalls) before the server settles.
+# A short per-attempt wget timeout previously caused *every single
+# attempt* to fail for this reason alone, regardless of how many times
+# it retried -- confirmed on a real device where the browser eventually
+# connected (after several manual reloads) while this loop kept failing
+# the whole time on a much shorter per-attempt budget. So: a generous
+# per-attempt timeout, and the overall budget is tracked against real
+# wall-clock time rather than a fixed attempt count, since one slow
+# attempt can itself now take much longer than a fixed polling interval
+# would assume.
+START_TIME=\$(date +%s)
+BUDGET=600
+LAST_PROGRESS=0
+while true; do
+	if wget -q -T 20 -O /dev/null "http://localhost:\$PORT/" 2>/dev/null; then
+		break
 	fi
 	kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
-	# 600 tries at 0.5s each is a long silent wait -- say something every
-	# ~10s so this doesn't look hung.
-	if [ "\$((tries % 20))" -eq 0 ]; then
-		echo "  ...still waiting (\$((tries / 2))s)"
+	NOW=\$(date +%s)
+	ELAPSED=\$((NOW - START_TIME))
+	if [ "\$ELAPSED" -ge "\$BUDGET" ]; then
+		echo "error: server did not come up after \${BUDGET}s" >&2
+		exit 1
 	fi
-	sleep 0.5
+	if [ "\$((ELAPSED - LAST_PROGRESS))" -ge 10 ]; then
+		LAST_PROGRESS=\$ELAPSED
+		echo "  ...still waiting (\${ELAPSED}s)"
+	fi
+	sleep 1
 done
 echo "Server is up: http://localhost:\$PORT"
 

@@ -53,7 +53,7 @@ const expectations = {
 	'Config.routes.dex': [Config?.routes?.dex, 'localhost:8000'],
 	'Config.defaultserver.host': [Config?.defaultserver?.host, 'localhost'],
 	'Config.defaultserver.port': [Config?.defaultserver?.port, 8000],
-	'Config.defaultserver.httpport': [Config?.defaultserver?.httpport, 0],
+	'Config.defaultserver.httpport': [Config?.defaultserver?.httpport, 8000],
 	'Config.testclient': [Config?.testclient, true],
 };
 

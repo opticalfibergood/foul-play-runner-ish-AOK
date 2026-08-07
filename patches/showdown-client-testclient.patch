@@ -39,11 +39,10 @@ index d36feae..96a2af3 100644
  					id: 'showdown',
 -					host: 'sim3.psim.us',
 -					port: 443,
--					httpport: 8000,
--					altport: 80,
 +					host: 'localhost',
 +					port: 8000,
-+					httpport: 0,
+ 					httpport: 8000,
+-					altport: 80,
 +					altport: 8000,
  					registered: true
  				},

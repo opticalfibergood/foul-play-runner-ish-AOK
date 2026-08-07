@@ -81,63 +81,47 @@ below if you want to check.
    offline story that has to happen over the network, and it happens in
    CI, never on-device.
 
-The server also fixes up the browser's connection, via the same
-`customhttpresponse` hook in `config.js`: once the client has loaded, it
-sends `/trn human` so there's no console command to type --
-`http://localhost:8000`, bare, just works.
+The server also fixes up the browser's connection at runtime, via the
+same `customhttpresponse` hook in `config.js`: once the client has
+loaded, it corrects `PS.server.protocol` and forces an immediate
+reconnect, then sends `/trn human` so there's no console command to type
+-- `http://localhost:8000`, bare, just works. The protocol fix is needed
+because of a genuine quirk in the client's own source: `PSServer`'s
+`protocol` field is derived from `Config.defaultserver.httpport`'s
+*truthiness* at construction time (`Config.defaultserver.httpport ?
+'https' : 'http'`), while that same field is *also* used as the literal
+port number for plain-`http` connections -- two contradictory
+requirements from one input, so no static `Config` value gets both right
+at once. `testclient-new.html`'s static patch alone leaves `protocol`
+wrongly set to `'https'`, which tries to open a secure WebSocket against
+a plain HTTP server and just sits on "Disconnected."
 
-Getting the connection itself to come up on the first try is handled
-entirely in `testclient-new.html`'s static patch, not at runtime. The
-reason that needs care at all is a genuine quirk in the client's own
-source: `PSServer`'s `protocol` field is derived from
-`Config.defaultserver.httpport`'s *truthiness*, once, at construction
-time (`Config.defaultserver.httpport ? 'https' : 'http'`) -- so leaving
-`httpport` at its upstream value of `8000` (truthy) makes the client's
-very first connection attempt open a secure WebSocket against a plain
-HTTP server, which just sits on "Disconnected." The fix is to set
-`httpport: 0` (falsy) in the embedded `Config` instead, so `protocol`
-computes to `'http'` correctly from the moment `PSServer` is
-constructed -- there's no wrong first attempt to correct after the fact.
-This is safe because `httpport` has exactly one other use in the client
-source: as the port number for the *fallback*, non-worker connection
-path (`directConnect()`), which only runs if a Web Worker can't be
-created at all. `port` (kept at `8000`) is what the default, worker-based
-path actually uses, so it's unaffected. The injected script still sets
-`PS.server.httpport = PS.server.port` defensively as a safety net for
-that fallback path, but it's inert in the common case -- a plain data
-correction with no socket or timer side effects.
-
-An earlier version of this fix took a different approach: leave
-`httpport` at `8000`, and correct `PS.server.protocol` at runtime via the
-injected script instead, forcing an immediate disconnect (`worker.
-postMessage({ type: 'disconnect' })`) and reconnect once the page loaded.
-That turned out to be the actual cause of a real bug, not a workaround
-for one: calling `.close()` on a WebSocket that's still `CONNECTING`
-doesn't close it synchronously -- per spec, the resulting `close` event
-is *queued* and fires asynchronously, after the immediately-following
-`reconnect()` call had already created a brand new socket.
-`client-connection-worker.js`'s `onclose` handler unconditionally nulls
-out its shared, module-level `socket` variable, with no check that the
-event it's handling still belongs to the socket currently in use -- so
-that stale, delayed `close` event would wipe out the reference to the
-brand-new (possibly already-connected) socket and schedule *another*
-reconnect on top of it, repeatedly. That's what "tries to connect over
-and over and never works" actually was: the fix script itself, racing
-with its own cleanup, not the server, `subprocesses: 0`, or foul-play.
-It went unnoticed because `verify-testclient-html.js` only checks static
-`Config` values baked into the HTML; nothing in this repo actually
-exercised the injected script's runtime behavior against a real
-WebSocket connection attempt in flight.
+Fixing `protocol` alone isn't quite enough, though: the client's actual
+connection logic runs inside a Web Worker
+(`client-connection-worker.js`), and that worker's `connectToServer()`
+no-ops (`if (socket) return`) while it's still holding a reference to
+whatever connection attempt is already in flight -- and by the time our
+injected script can possibly run (document order puts it after
+everything else on the page), the page's own *first* connection attempt,
+made with the wrong protocol, has already started. A plain
+`PS.connection.reconnect()` call can get silently ignored for as long as
+that stale, doomed-to-fail attempt takes to time out on its own -- which
+is exactly the "tries for a bit, then gets stuck before retrying"
+symptom this produced before the fix below. So the injected script also
+explicitly tells the worker to drop the stale attempt
+(`worker.postMessage({ type: 'disconnect' })`) *before* reconnecting;
+worker `postMessage` calls are processed in the order they're sent, so
+this is guaranteed to land before the follow-up `connect` message.
 
 All of this was confirmed directly against the real source
 (`client-main.ts`, `client-connection.ts`, `client-connection-worker.ts`)
-and verified by actually running both `showdown-server-config.patch` and
-`showdown-client-testclient.patch` against fresh clones: `git apply
---check` passes cleanly, `verify-testclient-html.js` confirms
-`Config.defaultserver.httpport` is `0` in the patched HTML, and the
-`customhttpresponse` build-time check in `20-showdown-server.sh` extracts
-and syntax-checks the injected script and asserts it no longer forces a
-disconnect+reconnect.
+and verified two ways: a raw `curl` WebSocket-upgrade probe against a
+real running (patched) server confirming the server side was never the
+problem (`101 Switching Protocols` with the correct
+`Sec-WebSocket-Accept`), and a mock of the real `PS`/`PS.connection`
+object confirming the injected script's actual call order --
+`worker.postMessage('disconnect')` then `reconnect()` then `/trn
+human` -- and resulting state.
 
 ## Sprites and icons
 
