@@ -1,5 +1,5 @@
 diff --git a/play.pokemonshowdown.com/testclient-new.html b/play.pokemonshowdown.com/testclient-new.html
-index d36feae..96a2af3 100644
+index d36feae..8ad2429 100644
 --- a/play.pokemonshowdown.com/testclient-new.html
 +++ b/play.pokemonshowdown.com/testclient-new.html
 @@ -16,7 +16,7 @@
@@ -47,7 +47,50 @@ index d36feae..96a2af3 100644
  					registered: true
  				},
  				customcolors: {}
-@@ -111,7 +111,7 @@
+@@ -108,10 +108,50 @@
+ 	<script src="js/battle-dex.js"></script>
+ 	<script src="js/battle-teams.js"></script>
+ 	<script src="js/battle-text-parser.js"></script>
++	<script>
++		// foul-play-ish-aok offline fix: scripts/mirror-sprites.js only
++		// mirrors *static* per-species battle sprites (the "gen5" family),
++		// not animated GIFs -- but Dex.getSpriteData() (battle-dex.ts)
++		// prefers an animated sprite whenever animation metadata for the
++		// species is available, which it always is once data/pokedex-mini.js
++		// and data/pokedex-mini-bw.js are loaded, regardless of Pokemon
++		// generation or the "2D sprites instead of 3D models" (bwgfx)
++		// setting -- BattlePokemonSpritesBW's animated entry gets tried
++		// either way. That's true by default (the "noanim"/"nogif" prefs
++		// are both null/off out of the box), so every in-battle sprite
++		// request 404s. PSPrefs reads its stored prefs from
++		// localStorage["showdown_prefs"] synchronously in its constructor,
++		// which runs the moment js/client-main.js is parsed below -- so
++		// this has to seed that key before that script tag.
++		//
++		// This only ever sets noanim specifically, not the whole
++		// showdown_prefs blob: an earlier version of this fix bailed out if
++		// showdown_prefs already existed *at all*, which meant it silently
++		// did nothing for anyone who'd ever changed any other setting
++		// (theme, layout, ...) -- that write already puts a showdown_prefs
++		// object in localStorage with no "noanim" key in it, which isn't
++		// the same thing as the user deliberately choosing to re-enable
++		// animation. Checking for the "noanim" key specifically, and
++		// merging into whatever's already stored, fixes sprites for that
++		// case too without touching any other saved preference. If the
++		// user (now or later, via the "Disable animations" checkbox) ever
++		// does set noanim explicitly, that choice is respected and never
++		// overwritten here.
++		try {
++			if (window.localStorage) {
++				var storedPrefs = {};
++				try { storedPrefs = JSON.parse(localStorage.getItem('showdown_prefs')) || {}; } catch (e) {}
++				if (!('noanim' in storedPrefs)) {
++					storedPrefs.noanim = true;
++					localStorage.setItem('showdown_prefs', JSON.stringify(storedPrefs));
++				}
++			}
++		} catch (e) {}
++	</script>
  	<script src="js/client-main.js"></script>
  	<script nomodule src="js/lib/sockjs-1.4.0-nwjsfix.min.js"></script>
  	<script src="js/client-connection.js"></script>
@@ -56,7 +99,7 @@ index d36feae..96a2af3 100644
  
  	<script src="js/lib/preact.min.js"></script>
  	<script src="js/panels.js"></script>
-@@ -159,8 +159,8 @@
+@@ -159,8 +199,8 @@
  	<script src="js/battle-team-editor.js?"></script>
  	<script src="js/panel-teambuilder-team.js?"></script>
  

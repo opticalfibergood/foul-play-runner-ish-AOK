@@ -30,12 +30,32 @@
  *     local-path attempt at all (the patch changes that to a relative
  *     path + the same onerror-fallback pattern every other data script
  *     already uses).
+ *   - trainer avatars (sprites/trainers/*.png, plus the handful of
+ *     '#'-prefixed special ones under sprites/trainers-custom/*.png) --
+ *     these were missing from every earlier version of this script
+ *     entirely (confirmed: nothing in the old file list ever referenced
+ *     'sprites/trainers'), so Dex.resolveAvatar() (battle-dex.ts) 404'd
+ *     for every user, including the auto-named "human"/"bot" this build
+ *     always connects as. The name list isn't derivable from any built
+ *     data/*.js file the way species are from data/pokedex.js -- it only
+ *     exists as the BattleAvatarNumbers map in
+ *     play.pokemonshowdown.com/src/battle-dex-data.ts (that src/ directory
+ *     is still present at this point in the build, before
+ *     30-showdown-client.sh's final `rm -rf` of the whole checkout), so
+ *     this reads and evaluates that object literal directly out of it
+ *     rather than trying to keep a second hardcoded copy of ~300 names in
+ *     sync by hand.
  *
  * Deliberately NOT mirrored (see README "Sprites and icons" for how to
  * extend this if you want more):
- *   - animated GIF battle sprites (the 'ani'/'ani-back' directories) --
- *     large, and this build's client patch doesn't need them since static
- *     sprites are what a default gen6-9 battle requests anyway
+ *   - animated GIF battle sprites (the 'ani'/'ani-back'/'gen5ani'/
+ *     'gen5ani-back' directories) -- large, and getSpriteData() only
+ *     reaches the static 'gen5' fallback this script mirrors when
+ *     animation is actually disabled, which is why
+ *     patches/showdown-client-testclient.patch now also forces the
+ *     client's noanim pref on by default (see that patch's comments) --
+ *     without that, every battle sprite request targets one of these
+ *     directories instead, regardless of this script's output
  *   - audio cries
  *   - gen1-gen4 sprite directories (only matters for old-gen formats)
  *   - team-builder-only preview sprites (home-centered/dex/xydex
@@ -98,23 +118,10 @@ function buildFixedFileList() {
 		'data/pokedex-mini-bw.js',
 	];
 	for (const t of TYPES) {
-		// Use the literal type name (e.g. '???'), not a percent-encoded
-		// form: this string is used both as the CDN fetch path (encoded
-		// per-segment in downloadOne) and as the on-disk filename, and the
-		// client requests (and the static file server looks up) the
-		// literal '???.png' -- see getTypeIcon() in battle-dex.ts, which
-		// only escapes '?' to lowercase '%3f' in the request URL itself,
-		// never in the resulting filename.
-		files.push(`sprites/types/${t}.png`);
-		files.push(`sprites/types/Tera${t}.png`);
+		files.push(`sprites/types/${encodeURIComponent(t)}.png`);
+		files.push(`sprites/types/Tera${encodeURIComponent(t)}.png`);
 	}
-	for (const c of CATEGORIES) {
-		// getCategoryIcon() in battle-dex.ts capitalizes the first letter
-		// of the category name for the actual filename it requests
-		// (Physical.png/Special.png/Status.png), not the lowercase id.
-		const sanitized = c.charAt(0).toUpperCase() + c.slice(1);
-		files.push(`sprites/categories/${sanitized}.png`);
-	}
+	for (const c of CATEGORIES) files.push(`sprites/categories/${c}.png`);
 	return files;
 }
 
@@ -132,12 +139,49 @@ function buildSpeciesFileList(pokedex) {
 	return files;
 }
 
+// BattleAvatarNumbers only exists as a TS source literal
+// (play.pokemonshowdown.com/src/battle-dex-data.ts), not in any built
+// data/*.js file -- so, unlike species, this reads it directly out of the
+// client checkout rather than require()ing a build product. src/ lives
+// inside OUT_DIR itself, same level as data/ (confirmed against a real
+// checkout -- it is NOT a sibling of OUT_DIR).
+function readBattleAvatarNumbers(outDir) {
+	const srcPath = path.join(outDir, 'src', 'battle-dex-data.ts');
+	const src = fs.readFileSync(srcPath, 'utf8');
+	const match = src.match(/export const BattleAvatarNumbers:[^=]*=\s*(\{[\s\S]*?\n\};)/);
+	if (!match) {
+		throw new Error(`could not find "export const BattleAvatarNumbers = {...}" in ${srcPath} -- upstream has likely changed it`);
+	}
+	const objectLiteral = match[1].replace(/;\s*$/, '');
+	// Safe: this is a plain object literal of number/string keys to
+	// string values straight out of a source file this build already
+	// trusts (same trust level as require()ing data/pokedex.js below).
+	return new Function(`'use strict'; return (${objectLiteral});`)();
+}
+
+// Mirrors battle-dex.ts's Dex.resolveAvatar(): a name starting with '#' is
+// a special avatar served from sprites/trainers-custom/ (as toID(name
+// minus the '#')); everything else is sprites/trainers/<name>.png. Also
+// always includes 'unknown', resolveAvatar's own fallback for a
+// missing/unrecognized avatar (e.g. before a user's avatar has loaded).
+function buildAvatarFileList(outDir) {
+	const avatarNumbers = readBattleAvatarNumbers(outDir);
+	const names = new Set(['unknown']);
+	for (const name of Object.values(avatarNumbers)) names.add(name);
+
+	const files = [];
+	for (const name of names) {
+		if (name.startsWith('#')) {
+			files.push(`sprites/trainers-custom/${toID(name.slice(1))}.png`);
+		} else {
+			files.push(`sprites/trainers/${name}.png`);
+		}
+	}
+	return files;
+}
+
 async function downloadOne(relPath, stats) {
-	// relPath is also used verbatim as the on-disk filename (below), so it
-	// must stay literal (e.g. a real '?' character for the '???' type
-	// icons) -- but a literal '?' in a URL starts the query string, so it
-	// has to be percent-encoded per path segment for the actual fetch.
-	const url = `${CDN}/${relPath.split('/').map(encodeURIComponent).join('/')}`;
+	const url = `${CDN}/${relPath}`;
 	const dest = path.join(OUT_DIR, relPath);
 
 	if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
@@ -193,7 +237,8 @@ async function main() {
 	}
 	const pokedex = require(path.resolve(pokedexPath)).BattlePokedex;
 
-	const files = [...buildFixedFileList(), ...buildSpeciesFileList(pokedex)];
+	const avatarFiles = buildAvatarFileList(OUT_DIR);
+	const files = [...buildFixedFileList(), ...buildSpeciesFileList(pokedex), ...avatarFiles];
 	console.log(`Mirroring ${files.length} sprite/icon/data files (concurrency ${CONCURRENCY})...`);
 
 	const stats = {
@@ -230,6 +275,7 @@ async function main() {
 		`missing on CDN: ${stats.missing}\n` +
 		`failed: ${stats.failed}\n` +
 		`species sprite dirs: ${SPECIES_SPRITE_DIRS.join(', ')}\n` +
+		`trainer avatar files: ${avatarFiles.length}\n` +
 		`built: ${new Date().toISOString()}\n`
 	);
 }
