@@ -13,9 +13,58 @@
  * in source control. Confirmed by hand against the actual repo.
  *
  * Mirrored:
- *   - sprite sheets: pokemon icons, pokeball icons, item icons (each is
- *     ONE image file covering every species/item -- cheap)
- *   - type icons + tera-type icons, category icons (small, fixed sets)
+ *   - sprite sheets: pokemon icons, pokeball icons, item icons, AND
+ *     trainers-sheet.png -- these are each ONE image file covering every
+ *     species/item/avatar (cheap). trainers-sheet.png specifically backs
+ *     the avatar-*picker* grid (.avatarlist button in style/client.css,
+ *     populated by client-topbar.js) -- a different code path from the
+ *     individual sprites/trainers/<name>.png files below, which are what
+ *     an already-chosen avatar actually renders as. Missing this one
+ *     doesn't 404 anyone's avatar, it just leaves the "change avatar"
+ *     dialog blank. Confirmed missing from every earlier version of this
+ *     script (only the three non-trainer sheets were ever listed).
+ *   - type icons (sprites/types/, used by Dex.getTypeIcon() -- move
+ *     types, tooltips, the battle log) + Tera-type icons + category
+ *     icons, AND, separately, sprites/typeicons/ -- a *different*
+ *     directory, same types minus the neutral/unknown '???' one (no
+ *     .typeicon-??? CSS rule exists for it), used by the
+ *     dedicated `typeicon`/`typeicon-<Type>` CSS classes
+ *     (style/sim-types.css) that the newer Preact `TypeIcon`-style
+ *     component in src/panels.tsx renders (`typeicon typeicon-${type}`).
+ *     Confirmed by grepping the actual client source, not assumed from
+ *     the similar name -- sprites/types/ and sprites/typeicons/ are two
+ *     genuinely separate CDN paths and mirroring one does not cover the
+ *     other.
+ *   - a handful of small, fixed, non-species image files that specific
+ *     UI/battle code hardcodes a literal path for (found by grepping
+ *     src/*.ts for literal and template-literal `sprites/...` paths, the
+ *     same way the trainer-avatar gap above was originally found):
+ *       - sprites/ani/substitute.gif + sprites/ani-back/substitute.gif --
+ *         the Substitute-doll sprite battle-animations.ts draws for
+ *         every use of the move Substitute, every battle. Not tied to
+ *         any species, so buildSpeciesFileList() never generates it.
+ *       - sprites/misc/mega.png, sprites/misc/alpha.png,
+ *         sprites/misc/omega.png -- the small badge battle-animations.ts
+ *         overlays on a Pokemon's HP bar name for Mega Evolution /
+ *         Primal Reversion (`symbol` in getPokemonName()'s source,
+ *         values verified directly from that function's own if/else --
+ *         it's exactly these three, nothing else).
+ *       - sprites/afd/meloetta.png, sprites/afd/meloetta-pirouette.png,
+ *         sprites/afd/digimonbg.jpg -- April Fools' Day art. Genuinely
+ *         code-gated (Dex.afdMode / client-main.ts's setAFD(), not dead
+ *         code), just rare to trigger outside of April 1st, so mirrored
+ *         for completeness but lowest priority of this batch.
+ *       - sprites/gen6bgs/bg-icecave.jpg, bg-earthycave.jpg -- fixed
+ *         battle-background images a couple of specific move animations
+ *         (battle-animations-moves.ts) switch the field to.
+ *     NOT mirrored from that same grep pass: the per-ladder-rank badge
+ *     icons battle-animations.ts also references as
+ *     sprites/misc/<formatType>_<type>.png -- unlike the three above,
+ *     that filename is built from live ladder data (side.badges) this
+ *     offline build has no source for, and the set of possible
+ *     formatType/type combinations isn't small/fixed the way mega/alpha/
+ *     omega is, so there's nothing concrete yet to add to the file list
+ *     here. Revisit if this build ever gets real ladder data.
  *   - per-species battle sprites, front+back, normal+shiny -- BOTH the
  *     static PNGs (the "gen5" family, always mirrored as the ultimate
  *     fallback) AND the animated GIFs, in whichever of the two families
@@ -92,6 +141,9 @@
  *     sprites instead of 3D models" checkbox actually toggles between)
  *   - team-builder-only preview sprites (home-centered/dex/xydex
  *     directories -- used only while building a team, not during battle)
+ *   - per-ladder-rank badge icons (sprites/misc/<formatType>_<type>.png,
+ *     see the NOT-mirrored note further up) -- needs live ladder data
+ *     this build has no source for
  */
 
 const fs = require('node:fs');
@@ -150,15 +202,36 @@ const TYPES = [
 ];
 const CATEGORIES = ['physical', 'special', 'status'];
 
+// sprites/typeicons/ has no icon for the neutral/unknown '???' type (no
+// .typeicon-??? rule exists in style/sim-types.css, unlike sprites/types/
+// which does get a '???.png' via the TYPES loop below) -- confirmed by
+// grepping sim-types.css for the exact set of typeicon-<Type> classes it
+// defines, rather than assumed from sprites/types/'s file list.
+const TYPEICON_TYPES = TYPES.filter((t) => t !== '???');
+
 function buildFixedFileList() {
 	const files = [
 		'sprites/pokemonicons-sheet.png',
 		'sprites/pokemonicons-pokeball-sheet.png',
 		'sprites/itemicons-sheet.png',
+		'sprites/trainers-sheet.png',
+		'sprites/ani/substitute.gif',
+		'sprites/ani-back/substitute.gif',
+		'sprites/misc/mega.png',
+		'sprites/misc/alpha.png',
+		'sprites/misc/omega.png',
+		'sprites/afd/meloetta.png',
+		'sprites/afd/meloetta-pirouette.png',
+		'sprites/afd/digimonbg.jpg',
+		'sprites/gen6bgs/bg-icecave.jpg',
+		'sprites/gen6bgs/bg-earthycave.jpg',
 	];
 	for (const t of TYPES) {
 		files.push(`sprites/types/${encodeURIComponent(t)}.png`);
 		files.push(`sprites/types/Tera${encodeURIComponent(t)}.png`);
+	}
+	for (const t of TYPEICON_TYPES) {
+		files.push(`sprites/typeicons/${encodeURIComponent(t)}.png`);
 	}
 	for (const c of CATEGORIES) files.push(`sprites/categories/${c}.png`);
 	return files;
