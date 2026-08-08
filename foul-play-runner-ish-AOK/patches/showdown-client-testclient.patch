@@ -1,0 +1,93 @@
+diff --git a/play.pokemonshowdown.com/testclient-new.html b/play.pokemonshowdown.com/testclient-new.html
+index d36feae..386443e 100644
+--- a/play.pokemonshowdown.com/testclient-new.html
++++ b/play.pokemonshowdown.com/testclient-new.html
+@@ -16,7 +16,7 @@
+ 	<div id="ps-frame">
+ 		<div id="header" class="header">
+ 			<div class="maintabbarbottom"></div>
+-			<img class="logo" src="https://play.pokemonshowdown.com/favicon-256.png" alt="Pokémon Showdown! (beta)" width="50" height="50">
++			<img class="logo" src="favicon-256.png" alt="Pokémon Showdown! (beta)" width="50" height="50">
+ 		</div>
+ 		<div class="ps-room scrollable" id="room-">
+ 			<div class="mainmenu-mini-windows">
+@@ -53,7 +53,7 @@
+ 		linkStyle("style/battle-search.css");
+ 		linkStyle("style/font-awesome.css");
+ 	</script>
+-	<script src="https://play.pokemonshowdown.com/config/config.js"></script>
++	<!-- remote config.js load removed: this deployment is offline-only -->
+ 	<script>
+ 		if (!window.Config) {
+ 			// offline
+@@ -62,18 +62,18 @@
+ 				bannedHosts: [],
+ 				whitelist: [],
+ 				routes: {
+-					root: "pokemonshowdown.com",
+-					client: "play.pokemonshowdown.com",
+-					dex: "dex.pokemonshowdown.com",
+-					replays: "replay.pokemonshowdown.com",
+-					users: "pokemonshowdown.com/users"
++					root: "localhost:8000",
++					client: "localhost:8000",
++					dex: "localhost:8000",
++					replays: "localhost:8000",
++					users: "localhost:8000/users"
+ 				},
+ 				defaultserver: {
+ 					id: 'showdown',
+-					host: 'sim3.psim.us',
+-					port: 443,
++					host: 'localhost',
++					port: 8000,
+ 					httpport: 8000,
+-					altport: 80,
++					altport: 8000,
+ 					registered: true
+ 				},
+ 				customcolors: {}
+@@ -108,10 +108,31 @@
+ 	<script src="js/battle-dex.js"></script>
+ 	<script src="js/battle-teams.js"></script>
+ 	<script src="js/battle-text-parser.js"></script>
++	<script>
++		// foul-play-ish-aok offline fix: scripts/mirror-sprites.js only
++		// mirrors *static* per-species battle sprites (the "gen5" family),
++		// not animated GIFs -- but Dex.getSpriteData() (battle-dex.ts)
++		// prefers an animated sprite whenever animation metadata for the
++		// species is available, which it always is once data/pokedex-mini.js
++		// and data/pokedex-mini-bw.js are loaded, regardless of Pokemon
++		// generation. That's true by default (the "noanim"/"nogif" prefs
++		// are both null/off out of the box), so every in-battle sprite
++		// request 404s. PSPrefs reads its stored prefs from
++		// localStorage["showdown_prefs"] synchronously in its constructor,
++		// which runs the moment js/client-main.js is parsed below -- so
++		// this has to seed that key before that script tag. Only sets a
++		// default: if showdown_prefs already exists (a previous run, or a
++		// user choice), it's left alone.
++		try {
++			if (window.localStorage && localStorage.getItem('showdown_prefs') === null) {
++				localStorage.setItem('showdown_prefs', JSON.stringify({ noanim: true }));
++			}
++		} catch (e) {}
++	</script>
+ 	<script src="js/client-main.js"></script>
+ 	<script nomodule src="js/lib/sockjs-1.4.0-nwjsfix.min.js"></script>
+ 	<script src="js/client-connection.js"></script>
+-	<script> Net.defaultRoute = 'https://play.pokemonshowdown.com'; </script>
++	<script> Net.defaultRoute = 'http://localhost:8000'; </script>
+ 
+ 	<script src="js/lib/preact.min.js"></script>
+ 	<script src="js/panels.js"></script>
+@@ -159,8 +180,8 @@
+ 	<script src="js/battle-team-editor.js?"></script>
+ 	<script src="js/panel-teambuilder-team.js?"></script>
+ 
+-	<script src="https://play.pokemonshowdown.com/data/pokedex-mini.js"></script>
+-	<script src="https://play.pokemonshowdown.com/data/pokedex-mini-bw.js"></script>
++	<script src="data/pokedex-mini.js" onerror="loadRemoteData(this.src)"></script>
++	<script src="data/pokedex-mini-bw.js" onerror="loadRemoteData(this.src)"></script>
+ 	<script src="data/typechart.js" onerror="loadRemoteData(this.src)"></script>
+ 	<script src="data/aliases.js" onerror="loadRemoteData(this.src)"></script>
+ 	<script src="js/lib/d3.v3.min.js"></script>
