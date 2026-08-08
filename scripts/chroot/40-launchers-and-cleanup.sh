@@ -166,16 +166,32 @@ if [ "\$START_BOT" -eq 1 ]; then
 	# in principle strike again after we've already declared victory once,
 	# and a real crash mid-battle is possible too). Supervise both
 	# processes for the rest of the run instead: the server dying is
-	# fatal, but foul-play dying gets auto-restarted so the bot doesn't
-	# just sit there OFFLINE.
+	# fatal, and foul-play crashing/disconnecting gets auto-restarted so
+	# the bot doesn't just sit there OFFLINE.
+	#
+	# foul-play's own run_foul_play() loops until it has played
+	# --run-count battles (default 1, confirmed in fp/config.py), then
+	# closes the websocket and returns -- run.py has no exception to
+	# reraise, so the process exits 0. That is a *clean, intentional*
+	# exit, not a crash, and must not be treated like one: restarting on
+	# it (as this loop used to do, unconditionally) meant the bot never
+	# actually stopped after a battle ended, no matter --run-count.
+	# Only a genuine nonzero exit is a crash worth auto-restarting from.
 	while true; do
 		[ "\$CLEANED_UP" -eq 1 ] && break
 		kill -0 "\$SERVER_PID" 2>/dev/null || { echo "error: server process died" >&2; exit 1; }
-		if ! kill -0 "\$BOT_PID" 2>/dev/null; then
-			wait "\$BOT_PID" 2>/dev/null || true
+		if [ -n "\$BOT_PID" ] && ! kill -0 "\$BOT_PID" 2>/dev/null; then
+			BOT_EXIT=0
+			wait "\$BOT_PID" 2>/dev/null || BOT_EXIT=\$?
 			[ "\$CLEANED_UP" -eq 1 ] && break
-			echo "foul-play disconnected/crashed -- restarting..."
-			launch_bot
+			if [ "\$BOT_EXIT" -eq 0 ]; then
+				echo "foul-play finished its battle(s) and exited cleanly -- not restarting."
+				echo "Server is still running at http://localhost:\$PORT; Ctrl-C to stop."
+				BOT_PID=""
+			else
+				echo "foul-play disconnected/crashed (exit \$BOT_EXIT) -- restarting..."
+				launch_bot
+			fi
 		fi
 		sleep 3
 	done
