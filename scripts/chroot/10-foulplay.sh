@@ -48,6 +48,29 @@ if ! git apply --check "$PATCH_DIR/foulplay-noguest-login.patch" 2>/tmp/patch-ch
 fi
 git apply "$PATCH_DIR/foulplay-noguest-login.patch"
 
+echo "==> Applying foulplay-disable-ping-keepalive.patch"
+# Modifies fp/websocket_client.py's create() to open the websocket with
+# ping_interval=None when FOUL_PLAY_NOGUEST_LOGIN=1 (same opt-in env var
+# as the patch above, set only by start-showdown against the bundled
+# offline server). Without this, the default 20s ping/pong keepalive in
+# the websockets library can get closed out from under login() -- sent
+# 1011 "keepalive ping timeout" -- while pokemon-showdown is still doing
+# synchronous startup work (chatroom restore, loading /formats, etc.)
+# after its TCP listener is already accepting connections. start-showdown's
+# supervision loop was masking this by silently restarting foul-play on
+# the first launch attempt; this patch removes the race itself instead of
+# just retrying past it. Guest/online logins against the real ladder are
+# unaffected. Depends on foulplay-noguest-login.patch being applied first
+# (that patch adds the `import os` this one relies on) -- hence applying
+# it second, here.
+if ! git apply --check "$PATCH_DIR/foulplay-disable-ping-keepalive.patch" 2>/tmp/patch-check.err; then
+    echo "error: foulplay-disable-ping-keepalive.patch no longer applies cleanly to foul-play@${FOUL_PLAY_COMMIT}" >&2
+    cat /tmp/patch-check.err >&2
+    echo "foul-play's fp/websocket_client.py has likely changed upstream; the patch needs updating." >&2
+    exit 1
+fi
+git apply "$PATCH_DIR/foulplay-disable-ping-keepalive.patch"
+
 echo "==> Verifying the patched file (syntax + structure)"
 python3 -m py_compile fp/websocket_client.py
 python3 - <<'PY'
@@ -55,6 +78,7 @@ import ast
 tree = ast.parse(open("fp/websocket_client.py").read())
 funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)]
 assert "login" in funcs, "login() is no longer an async function after patching -- aborting"
+assert "create" in funcs, "create() is no longer an async function after patching -- aborting"
 print("py_compile + structure check OK; async functions:", funcs)
 PY
 

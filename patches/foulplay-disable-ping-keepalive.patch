@@ -1,0 +1,36 @@
+diff --git a/fp/websocket_client.py b/fp/websocket_client.py
+index 4be7cb6..8d7b2c9 100644
+--- a/fp/websocket_client.py
++++ b/fp/websocket_client.py
+@@ -33,7 +33,30 @@ class PSWebsocketClient:
+         self.username = username
+         self.password = password
+         self.address = address
+-        self.websocket = await websockets.connect(self.address)
++        if os.environ.get("FOUL_PLAY_NOGUEST_LOGIN") == "1":
++            # Same offline-server opt-in as login()'s guest-login skip below.
++            # The bundled pokemon-showdown server is still doing
++            # synchronous startup work (restoring chatrooms, loading the
++            # large /formats payload, etc.) for a while after its TCP
++            # listener is up -- sometimes even after this WebSocket
++            # handshake itself completes -- which can make it miss the
++            # client's default 20s ping/pong keepalive and get its
++            # connection force-closed with "1011 keepalive ping timeout"
++            # before login() ever gets a chance (confirmed directly: this
++            # is what start-showdown's automatic bot-restart loop was
++            # recovering from on a fair fraction of first launches). This
++            # is a loopback connection to a server process we are
++            # ourselves supervising, so we don't need this library-level
++            # heartbeat to detect a dead peer -- a closed socket or dead
++            # process is already caught elsewhere (recv() raising, or the
++            # launcher's own kill -0 checks). Disabling it removes that
++            # startup race entirely instead of just retrying past it.
++            # Guest/online logins against the real ladder are unaffected.
++            self.websocket = await websockets.connect(
++                self.address, ping_interval=None
++            )
++        else:
++            self.websocket = await websockets.connect(self.address)
+         self.login_uri = (
+             "https://play.pokemonshowdown.com/api/login"
+             if password

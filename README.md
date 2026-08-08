@@ -189,7 +189,7 @@ time -- extend `scripts/mirror-sprites.js`'s `STATIC_SPECIES_SPRITE_DIRS`/
 
 ## How patches work
 
-Nothing here overwrites an upstream file wholesale. Three real,
+Nothing here overwrites an upstream file wholesale. Four real,
 `git apply`-compatible unified diffs live in `patches/`:
 
 - `showdown-server-config.patch` -- the four config changes above, plus
@@ -202,6 +202,21 @@ Nothing here overwrites an upstream file wholesale. Three real,
   login-server HTTP round trip when `FOUL_PLAY_NOGUEST_LOGIN=1` is set
   (only `start-showdown` sets it; foul-play's normal behavior against the
   real ladder is completely unchanged)
+- `foulplay-disable-ping-keepalive.patch` -- applied on top of the patch
+  above (it relies on the `import os` that one adds). Opens the websocket
+  with `ping_interval=None` under the same `FOUL_PLAY_NOGUEST_LOGIN=1`
+  opt-in. Without it, the bundled server's synchronous startup work
+  (chatroom restore, loading `/formats`, etc.) can still be running well
+  after its TCP listener is up, long enough to miss the websockets
+  library's default 20s ping/pong keepalive -- foul-play's first
+  connection then gets force-closed with `1011 keepalive ping timeout`
+  before login ever happens. `start-showdown`'s restart loop silently
+  papered over this by retrying, but the race could still fire again;
+  disabling the client-side keepalive removes it outright. This is a
+  loopback connection to a server process the launcher is itself
+  supervising, so the library-level heartbeat isn't needed to detect a
+  dead peer -- a closed socket or dead process is already caught
+  elsewhere. Online/ladder logins are unaffected.
 
 Each is applied with `git apply --check` first; if it doesn't apply
 cleanly (upstream changed the file in a way that no longer matches), the
@@ -215,10 +230,11 @@ not just "the file still contains some expected string":
   embedded fallback-config script, syntax-checks it standalone, then
   actually executes it in a minimal browser-shim `vm` context and asserts
   `Config.routes.client`, `Config.defaultserver.*`, etc. come out right
-- the foul-play patch: `python3 -m py_compile` + an `ast`-based check that
-  `login` is still an `async def` (`scripts/chroot/10-foulplay.sh`)
+- the foul-play patches: `python3 -m py_compile` + an `ast`-based check
+  that `login` and `create` are still `async def` after both patches are
+  applied (`scripts/chroot/10-foulplay.sh`)
 
-All three patches were built and test-applied against real, freshly
+All four patches were built and test-applied against real, freshly
 cloned checkouts before being committed here -- not hand-written and
 hoped-for.
 
