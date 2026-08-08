@@ -1,7 +1,7 @@
 name: Build offline foul-play + pokemon-showdown rootfs for iSH-AOK
 
 on:
-  # Rebuild every Monday. Since Alpine's own version is now pinned (see
+  # Rebuild every day. Since Alpine's own version is now pinned (see
   # alpine_version below), this no longer pulls in new Alpine OS releases
   # by itself -- it re-fetches fresh packages from the pinned branch's apk
   # repo (rust/cargo/etc. still get their normal point updates) and rebuilds
@@ -12,7 +12,7 @@ on:
   # workflow_dispatch with a blacksmith-*-arm runner instead, or edit the
   # fallback below.
   schedule:
-    - cron: "17 6 * * 1"
+    - cron: "17 6 * * *"
 
   # Manual "build me an update" button, with a couple of knobs.
   workflow_dispatch:
@@ -69,8 +69,10 @@ on:
           - blacksmith-4vcpu-ubuntu-2404-arm
           - blacksmith-2vcpu-ubuntu-2404-arm
 
-  # Lets you sanity-check changes to the build scripts/patches themselves
-  # without waiting for Monday. Does not publish a release.
+  # Commits that touch the build itself get built and released
+  # automatically -- no need to wait for Monday or click the manual
+  # dispatch button. Scoped to build-affecting paths so unrelated commits
+  # (README edits, etc.) don't spin up a build.
   push:
     branches: [main]
     paths:
@@ -113,7 +115,14 @@ jobs:
 
       - name: Compute build timestamp
         id: ts
-        run: echo "value=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+        run: |
+          # "tag" is the unique, tag-safe identifier (real timestamp down to
+          # the second, plus the short commit sha) that makes *this* run's
+          # release genuinely its own release instead of colliding with any
+          # other run's. "display" is just the human-readable form used in
+          # the release title/body.
+          echo "tag=$(date -u +'%Y%m%d-%H%M%S')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "display=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifact (debugging / non-release runs)
         uses: actions/upload-artifact@v4
@@ -122,17 +131,26 @@ jobs:
           path: out/*
           retention-days: 14
 
-      - name: Publish / update release
-        if: github.event_name != 'push'
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rootfs-latest
-          # rootfs-latest is a fixed tag that gets edited in place on every
-          # run -- GitHub doesn't reliably surface an updated "published"
-          # date for an edited release, so the actual build time needs to
-          # be visible in the name itself, not just buried in the body.
-          name: "foul-play + offline pokemon-showdown rootfs for iSH-AOK (built ${{ steps.ts.outputs.value }})"
+          # Every run gets its own tag (real UTC timestamp, to the second,
+          # plus the short commit sha), so every build becomes its own
+          # release -- nothing gets edited or piled onto a shared release
+          # page. softprops/action-gh-release creates a new release
+          # whenever the tag doesn't already exist yet, which a tag this
+          # specific never will.
+          tag_name: "rootfs-${{ steps.ts.outputs.tag }}"
+          name: "foul-play + offline pokemon-showdown rootfs for iSH-AOK (built ${{ steps.ts.outputs.display }})"
           body_path: out/BUILD_INFO.txt
+          # make_latest flags THIS release as the one GitHub's own
+          # "latest release" pointer follows. Combined with build-rootfs.sh
+          # always also copying the tarball to a constant filename
+          # (foul-play-showdown-offline-<arch>-latest.tar.gz, not the
+          # timestamped one), this gives a URL that never needs updating:
+          #   https://github.com/<owner>/<repo>/releases/latest/download/foul-play-showdown-offline-aarch64-latest.tar.gz
+          # always resolves to the newest build, with no version-checking
+          # required on the pulling end.
           make_latest: true
           files: |
             out/*.tar.gz

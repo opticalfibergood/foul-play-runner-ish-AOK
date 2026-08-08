@@ -181,7 +181,7 @@ trap - EXIT
 # 7. Package it up.
 # ---------------------------------------------------------------------------
 log "Packaging tarball"
-TIMESTAMP="$(date -u +%Y%m%d)"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARTIFACT_BASENAME="foul-play-showdown-offline"
 ARTIFACT="${ARTIFACT_BASENAME}-alpine${ALPINE_VERSION}-${ARCH}-${TIMESTAMP}.tar.gz"
 
