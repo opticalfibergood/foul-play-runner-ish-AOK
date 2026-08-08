@@ -98,10 +98,23 @@ function buildFixedFileList() {
 		'data/pokedex-mini-bw.js',
 	];
 	for (const t of TYPES) {
-		files.push(`sprites/types/${encodeURIComponent(t)}.png`);
-		files.push(`sprites/types/Tera${encodeURIComponent(t)}.png`);
+		// Use the literal type name (e.g. '???'), not a percent-encoded
+		// form: this string is used both as the CDN fetch path (encoded
+		// per-segment in downloadOne) and as the on-disk filename, and the
+		// client requests (and the static file server looks up) the
+		// literal '???.png' -- see getTypeIcon() in battle-dex.ts, which
+		// only escapes '?' to lowercase '%3f' in the request URL itself,
+		// never in the resulting filename.
+		files.push(`sprites/types/${t}.png`);
+		files.push(`sprites/types/Tera${t}.png`);
 	}
-	for (const c of CATEGORIES) files.push(`sprites/categories/${c}.png`);
+	for (const c of CATEGORIES) {
+		// getCategoryIcon() in battle-dex.ts capitalizes the first letter
+		// of the category name for the actual filename it requests
+		// (Physical.png/Special.png/Status.png), not the lowercase id.
+		const sanitized = c.charAt(0).toUpperCase() + c.slice(1);
+		files.push(`sprites/categories/${sanitized}.png`);
+	}
 	return files;
 }
 
@@ -120,7 +133,11 @@ function buildSpeciesFileList(pokedex) {
 }
 
 async function downloadOne(relPath, stats) {
-	const url = `${CDN}/${relPath}`;
+	// relPath is also used verbatim as the on-disk filename (below), so it
+	// must stay literal (e.g. a real '?' character for the '???' type
+	// icons) -- but a literal '?' in a URL starts the query string, so it
+	// has to be percent-encoded per path segment for the actual fetch.
+	const url = `${CDN}/${relPath.split('/').map(encodeURIComponent).join('/')}`;
 	const dest = path.join(OUT_DIR, relPath);
 
 	if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
