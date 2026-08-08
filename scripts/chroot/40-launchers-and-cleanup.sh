@@ -23,18 +23,32 @@ PORT="${SHOWDOWN_PORT}"
 BOT_MODE="accept_challenge"
 FORMAT="gen9randombattle"
 START_BOT=1
+# foul-play's own run_foul_play() (fp/main.py) plays exactly
+# --run-count battles on one persistent connection, then closes the
+# websocket and returns -- and --run-count defaults to 1 (fp/config.py)
+# when not given at all. accept_challenge()/pokemon_battle() are written
+# to be called over and over on that same connection (confirmed in
+# fp/websocket_client.py), so a single battle-and-log-off was never the
+# intended steady state here -- it's just what happens if nothing tells
+# foul-play to keep going. Default this high enough that it's
+# effectively "stay online and keep accepting challenges" for a
+# locally-hosted bot; override with --battles for a bounded run.
+BATTLES=1000000
 
 while [ \$# -gt 0 ]; do
 	case "\$1" in
 		--port) PORT="\$2"; shift 2 ;;
 		--bot-mode) BOT_MODE="\$2"; shift 2 ;;
 		--format) FORMAT="\$2"; shift 2 ;;
+		--battles) BATTLES="\$2"; shift 2 ;;
 		--no-bot) START_BOT=0; shift ;;
 		--help)
-			echo "usage: start-showdown [--port N] [--bot-mode MODE] [--format FORMAT] [--no-bot]"
+			echo "usage: start-showdown [--port N] [--bot-mode MODE] [--format FORMAT] [--battles N] [--no-bot]"
 			echo "  --port N        showdown server port (default: ${SHOWDOWN_PORT})"
 			echo "  --bot-mode MODE foul-play --bot-mode (default: accept_challenge)"
 			echo "  --format FORMAT foul-play --pokemon-format (default: gen9randombattle)"
+			echo "  --battles N     foul-play --run-count -- battles to play before logging"
+			echo "                  off for good, not just after the first one (default: \$BATTLES)"
 			echo "  --no-bot        just run the server, don't start foul-play"
 			exit 0
 			;;
@@ -99,7 +113,8 @@ launch_bot() {
 		--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
 		--ps-username bot \\
 		--bot-mode "\$BOT_MODE" \\
-		--pokemon-format "\$FORMAT" &
+		--pokemon-format "\$FORMAT" \\
+		--run-count "\$BATTLES" &
 	BOT_PID=\$!
 }
 
