@@ -12,6 +12,19 @@
  * files) -- the real site's sprite images live only on the live CDN, not
  * in source control. Confirmed by hand against the actual repo.
  *
+ * This script only ever fetches from the real CDN and writes into the
+ * local static tree -- it can't do anything about references that never
+ * even try the local copy in the first place. A few of those exist too:
+ * some of style/client2.css and style/sim-types.css's `url(...)`s (the
+ * two stylesheets testclient-new.html actually loads) are hardcoded
+ * *absolute* `https://play.pokemonshowdown.com/...` URLs rather than
+ * relative ones, and js/panel-popups.js (built from panel-popups.tsx) has
+ * one hardcoded the same way for the registration-form captcha image --
+ * both bypass local serving entirely regardless of what this script
+ * mirrors. Those are fixed by patches/showdown-client-css-fixes.patch and
+ * a build-script-level string replacement respectively (see
+ * 30-showdown-client.sh) -- not by anything in this file.
+ *
  * Mirrored:
  *   - sprite sheets: pokemon icons, pokeball icons, item icons, AND
  *     trainers-sheet.png -- these are each ONE image file covering every
@@ -54,9 +67,57 @@
  *         code-gated (Dex.afdMode / client-main.ts's setAFD(), not dead
  *         code), just rare to trigger outside of April 1st, so mirrored
  *         for completeness but lowest priority of this batch.
+ *       - fx/mail.png, fx/item.png -- small icons battle-animations.ts
+ *         draws next to a Pokemon's name in the battle log whenever it's
+ *         holding a Mail or a (non-Mail) item. Shown in most battles.
+ *       - fx/client-bgsheet.png -- the picker-thumbnail spritesheet for
+ *         PSBackground's (client-core.ts) "change background" dialog
+ *         (style/client2.css's .bglist button span, a *relative*
+ *         ../fx/... URL -- unlike the sheets below, this one was never
+ *         broken by the CSS bug patches/showdown-client-css-fixes.patch
+ *         fixes, it was just never mirrored at all).
+ *       - the fx/ effect-sprite table (BattleEffects in
+ *         battle-animations.ts): 58 small hit/impact/status images
+ *         (fireballs, slashes, wisps, etc.) that back the large majority
+ *         of move animations, in every battle. Extracted by parsing every
+ *         `url: '...'` entry in that table, not guessed at -- see
+ *         FX_EFFECT_FILES below for the exact list and how its boundary
+ *         was verified. Entries in that table with no `url` at all
+ *         (procedural/CSS-only effects) are correctly excluded, matching
+ *         the `if (!BattleEffects[id].url) continue;` skip
+ *         battle-animations.ts's own setup code already does.
+ *       - PSBackground's (client-core.ts) 4 selectable "Official"
+ *         fx/client-bg-<theme>.jpg background themes (CLIENT_BG_THEMES
+ *         below) -- this is the *entire app's* background image, not
+ *         battle-specific, and defaults to a random one of these four for
+ *         every user who hasn't chosen a background before. Previously
+ *         entirely unmirrored, meaning the whole app had a broken
+ *         background by default for every single user.
+ *       - the full default (gen6+) random battle-backdrop set
+ *         (BATTLE_BACKDROPS below, sprites/gen6bgs/*.jpg) -- every
+ *         default-format battle picks one of these at random
+ *         (battle-animations.ts), not just the two specific ones a couple
+ *         of move animations switch to (bg-icecave.jpg/bg-earthycave.jpg,
+ *         which are also both members of this same array, so they're
+ *         subsumed here rather than separately listed). An earlier
+ *         version of this script only had those two of the full 19,
+ *         meaning ~17 of 19 possible default battle backgrounds 404'd.
+ *       - the equivalent old-gen (graphicsGen <= 5) backdrop sets --
+ *         BATTLE_BACKDROPS_THREE/FOUR/FIVE plus the two single fixed
+ *         gen1/gen2 files -- reachable via the same bwgfx pref (forces
+ *         graphicsGen to 5) or an actual old-gen battle format.
+ *       - FX_TOUR_BACKDROPS: backdrops gated on a rated battle's tour
+ *         name (Smogon Premier League/NPA/World Cup/Smogon Champions
+ *         League) -- realistically unreachable here (needs live
+ *         ladder/tournament data this offline build has no source for),
+ *         but a small, fully-enumerable fixed list straight out of
+ *         battle-animations.ts's own if/else chain, so mirrored anyway.
  *       - sprites/gen6bgs/bg-icecave.jpg, bg-earthycave.jpg -- fixed
  *         battle-background images a couple of specific move animations
- *         (battle-animations-moves.ts) switch the field to.
+ *         (battle-animations-moves.ts) switch the field to. (Now folded
+ *         into BATTLE_BACKDROPS above, since both are members of that
+ *         same array -- kept here only as a pointer for anyone grepping
+ *         for these two filenames specifically.)
  *     NOT mirrored from that same grep pass: the per-ladder-rank badge
  *     icons battle-animations.ts also references as
  *     sprites/misc/<formatType>_<type>.png -- unlike the three above,
@@ -110,6 +171,21 @@
  *     more bandwidth, but not broken. The extra 404s this can cause for
  *     species without real art in that family are expected and tolerated
  *     (see downloadOne/stats.missing below) either way.
+ *   - old-gen (gen1-gen4) per-species static sprites, for every species
+ *     that could actually appear in a battle of that generation
+ *     (speciesGenFor() below <= that gen). getSpriteData() picks these
+ *     directories via `graphicsGen` -- which defaults to the *battle's*
+ *     own generation (`mechanicsGen`/options.gen), not a client
+ *     preference -- whenever that's 4 or below, no animation is ever
+ *     attempted for gen1-4 (the `spriteData.gen >= 5` guard), and gen1
+ *     specifically never gets a '-shiny' variant (shiny didn't exist yet;
+ *     `if (options.shiny && mechanicsGen > 1)`). This build's own
+ *     start-showdown launcher exposes `--format`, passed straight through
+ *     to foul-play as `--pokemon-format` with no gen restriction (see
+ *     40-launchers-and-cleanup.sh) -- so an old-gen format (e.g. `--format
+ *     gen3ou`) is a first-class, documented, one-flag way to reach these,
+ *     not a theoretical edge case, and skipping them would break sprites
+ *     for anyone who uses that flag for its stated purpose.
  *   - data/pokedex-mini(-bw).js: NOT images, the animation metadata
  *     described above. These are the two files testclient-new.html
  *     hardcodes an absolute CDN URL for with no local-path attempt at
@@ -134,11 +210,6 @@
  * Deliberately NOT mirrored (see README "Sprites and icons" for how to
  * extend this if you want more):
  *   - audio cries
- *   - gen1-gen4 sprite directories (only matters for old-gen formats,
- *     i.e. graphicsGen <= 4, which requires either playing an old-gen
- *     format or the "nopastgens"/specific old-gen-forcing prefs -- not
- *     reachable via the two settings, default and bwgfx, that the "2D
- *     sprites instead of 3D models" checkbox actually toggles between)
  *   - team-builder-only preview sprites (home-centered/dex/xydex
  *     directories -- used only while building a team, not during battle)
  *   - per-ladder-rank badge icons (sprites/misc/<formatType>_<type>.png,
@@ -182,7 +253,58 @@ function spriteIdFor(id, data) {
 	return spriteid;
 }
 
+// Exact algorithm copied from battle-dex-data.ts's Species constructor's
+// `this.gen` fallback (data/pokedex.js has NO 'gen' field for the
+// overwhelming majority of entries -- confirmed directly: only 166/1517,
+// almost all cosmetic alt-formes -- so this num-range-based inference is
+// what the client actually runs for essentially every species, not an
+// edge case). Verified against 20 hand-picked species spanning gen1-9,
+// megas, and a primal, all matching known real gens exactly. A handful
+// of cosmetic-only formes (Burmy/Shellos/Deerling/Vivillon color
+// variants) have no 'num' at all and resolve to 0 here, same as the real
+// client -- deliberately not treated as "old" by hasOldGenArt() below,
+// since spriteData.gen = Math.max(graphicsGen, Math.min(0, 5)) is just
+// graphicsGen unconditionally for them, i.e. they behave as if this
+// per-species capping doesn't apply at all, in every generation.
+function speciesGenFor(id, data) {
+	if (typeof data.gen === 'number' && data.gen) return data.gen;
+	const num = data.num || 0;
+	const baseSpecies = data.baseSpecies || data.name;
+	const forme = data.forme || '';
+	const baseId = toID(baseSpecies);
+	const formeid = baseId === id ? '' : '-' + toID(forme);
+	const isMega = !!(forme && formeid.includes('mega'));
+	const isPrimal = !!(forme && formeid === '-primal');
+
+	if (num >= 906 || formeid.startsWith('-paldea')) return 9;
+	if (num >= 810 || formeid.startsWith('-galar') || formeid.startsWith('-hisui')) return 8;
+	if (num >= 722 || formeid === '-alola' || formeid === '-starter') return 7;
+	if (isMega || isPrimal) return 6;
+	if (formeid === '-totem' || formeid === '-alolatotem') return 7;
+	if (num >= 650) return 6;
+	if (num >= 494) return 5;
+	if (num >= 387) return 4;
+	if (num >= 252) return 3;
+	if (num >= 152) return 2;
+	if (num >= 1) return 1;
+	return 0;
+}
+
 const STATIC_SPECIES_SPRITE_DIRS = ['gen5', 'gen5-back', 'gen5-shiny', 'gen5-back-shiny'];
+
+// getSpriteData()'s old-gen (1-4) static directories: `dir = (baseDir ||
+// 'gen5') + dir;` with baseDir = ['', 'gen1', 'gen2', 'gen3', 'gen4',
+// 'gen5', '', '', '', ''][spriteData.gen] -- picked whenever the battle's
+// own generation (not a client pref) is 1-4. No animation is ever
+// attempted for these (getSpriteData()'s `spriteData.gen >= 5` guard), and
+// gen1 never gets a shiny variant (`if (options.shiny && mechanicsGen >
+// 1)`) since Shiny didn't exist in Gen 1.
+const OLD_GEN_STATIC_DIRS = {
+	1: ['gen1', 'gen1-back'],
+	2: ['gen2', 'gen2-back', 'gen2-shiny', 'gen2-back-shiny'],
+	3: ['gen3', 'gen3-back', 'gen3-shiny', 'gen3-back-shiny'],
+	4: ['gen4', 'gen4-back', 'gen4-shiny', 'gen4-back-shiny'],
+};
 
 // The two animated-sprite families getSpriteData() can draw from. animDir
 // is the literal prefix it puts in front of 'ani'/'ani-back' -- '' for the
@@ -209,6 +331,95 @@ const CATEGORIES = ['physical', 'special', 'status'];
 // defines, rather than assumed from sprites/types/'s file list.
 const TYPEICON_TYPES = TYPES.filter((t) => t !== '???');
 
+// Every image battle-animations.ts's BattleEffects table can turn into a
+// `Dex.fxPrefix + url` request (fx/<file>.png) -- these back the small
+// hit/impact/status graphics (fireballs, slashes, wisps, etc.) that
+// virtually every move animation uses, in every battle. Extracted by
+// grepping every `url: '...'` in that table (confirmed count: 58, boundary
+// double-checked against the object literal's own opening/closing braces
+// so nothing past its end got swept in). A handful of BattleEffects
+// entries have no `url` at all (procedural/CSS-only effects) and are
+// correctly absent from this list, matching the `if
+// (!BattleEffects[id].url) continue;` skip in battle-animations.ts's own
+// setup code.
+const FX_EFFECT_FILES = [
+	'alpha.png', 'angry.png', 'blackwisp.png', 'bluefireball.png', 'bone.png',
+	'bottombite.png', 'caltrop.png', 'electroball.png', 'energyball.png',
+	'feather.png', 'fireball.png', 'fist.png', 'fist1.png', 'flareball.png',
+	'foot.png', 'gear.png', 'greenmetal1.png', 'greenmetal2.png', 'heart.png',
+	'hitmarker.png', 'iceball.png', 'icicle-pink.png', 'icicle.png',
+	'impact.png', 'leaf1.png', 'leaf2.png', 'leftchop.png', 'leftclaw.png',
+	'leftslash.png', 'lightning.png', 'mistball.png', 'moon.png',
+	'mudwisp.png', 'omega.png', 'petal.png', 'pointer.png',
+	'poisoncaltrop.png', 'poisonwisp.png', 'pokeball.png', 'rainbow.png',
+	'rightchop.png', 'rightclaw.png', 'rightslash.png', 'rock1.png',
+	'rock2.png', 'rock3.png', 'rocks.png', 'shadowball.png', 'shell.png',
+	'shine.png', 'stare.png', 'sword.png', 'topbite.png', 'ultra.png',
+	'waterwisp.png', 'web.png', 'wisp.png', 'z-symbol.png',
+];
+
+// PSBackground's (client-core.ts) four selectable "Official" background
+// themes -- this is the *entire app's* background image, not
+// battle-specific, and picks one of these four at random by default for
+// every user who hasn't explicitly chosen one (or "solidblue", a CSS
+// color with no image; or "custom", a user-uploaded data URL with no
+// fixed file; or the April Fools' "digimon" one, which actually loads
+// sprites/afd/digimonbg.jpg instead of this fx/client-bg-*.jpg pattern --
+// already mirrored above). Confirmed exhaustive against the "Official"
+// section of the actual background-picker UI (panel-popups.tsx's
+// BackgroundListPanel), not just the default-random-pick array, since
+// those two lists could in principle have drifted apart.
+const CLIENT_BG_THEMES = ['charizards', 'horizon', 'ocean', 'shaymin'];
+
+// battle-animations.ts's non-default-gen6+ battle backdrops: old-gen
+// formats (graphicsGen <= 5, reachable via the "2D sprites"/bwgfx pref
+// forcing graphicsGen to 5, or an actual old-gen battle format) pick a
+// backdrop from one of these three arrays instead of BATTLE_BACKDROPS
+// below, and gen1/gen2 use a single fixed file each rather than a random
+// array.
+const BATTLE_BACKDROPS_OLD_GEN = ['bg-gen1.png', 'bg-gen2.png'];
+const BATTLE_BACKDROPS_THREE = [
+	'bg-gen3.png', 'bg-gen3-cave.png', 'bg-gen3-ocean.png', 'bg-gen3-sand.png',
+	'bg-gen3-forest.png', 'bg-gen3-arena.png',
+];
+const BATTLE_BACKDROPS_FOUR = [
+	'bg-gen4.png', 'bg-gen4-cave.png', 'bg-gen4-snow.png', 'bg-gen4-indoors.png',
+	'bg-gen4-water.png',
+];
+const BATTLE_BACKDROPS_FIVE = [
+	'bg-beach.png', 'bg-beachshore.png', 'bg-desert.png', 'bg-meadow.png',
+	'bg-thunderplains.png', 'bg-city.png', 'bg-earthycave.png', 'bg-mountain.png',
+	'bg-volcanocave.png', 'bg-dampcave.png', 'bg-forest.png', 'bg-river.png',
+	'bg-deepsea.png', 'bg-icecave.png', 'bg-route.png',
+];
+// Rated-battle-with-a-specific-tour-name backdrops (SPL/NPA/WCOP/SCL) --
+// gated on `battle.rated` starting with one of those tournament name
+// strings, which is live server/ladder data this offline build has no
+// source for, so realistically unreachable here -- mirrored anyway since
+// it's a small, fully-enumerable, fixed list (battle-animations.ts's own
+// if/else chain), not the open-ended per-ladder-badge case that's still
+// deliberately skipped further down.
+const FX_TOUR_BACKDROPS = [
+	'bg-gen1-spl.png', 'bg-gen2-spl.png', 'bg-gen3-spl.png', 'bg-gen4-spl.png',
+	'bg-spl.png', 'bg-npa.png', 'bg-wcop.png', 'bg-scl.png',
+];
+
+// battle-animations.ts's default (gen6+) random battle backdrop -- picked
+// for literally every battle in the current/default generation (i.e. the
+// overwhelmingly common case), *not* just the two backdrops a couple of
+// specific move animations switch to (bg-icecave.jpg/bg-earthycave.jpg,
+// both of which are members of this same array, so they're subsumed here
+// rather than separately listed -- see the doc comment up top). An
+// earlier version of this script only had those two of the full 19,
+// meaning ~17 of 19 possible default battle backgrounds were unmirrored.
+const BATTLE_BACKDROPS = [
+	'bg-aquacordetown.jpg', 'bg-beach.jpg', 'bg-city.jpg', 'bg-dampcave.jpg',
+	'bg-darkbeach.jpg', 'bg-darkcity.jpg', 'bg-darkmeadow.jpg', 'bg-deepsea.jpg',
+	'bg-desert.jpg', 'bg-earthycave.jpg', 'bg-elite4drake.jpg', 'bg-forest.jpg',
+	'bg-icecave.jpg', 'bg-leaderwallace.jpg', 'bg-library.jpg', 'bg-meadow.jpg',
+	'bg-orasdesert.jpg', 'bg-orassea.jpg', 'bg-skypillar.jpg',
+];
+
 function buildFixedFileList() {
 	const files = [
 		'sprites/pokemonicons-sheet.png',
@@ -223,8 +434,9 @@ function buildFixedFileList() {
 		'sprites/afd/meloetta.png',
 		'sprites/afd/meloetta-pirouette.png',
 		'sprites/afd/digimonbg.jpg',
-		'sprites/gen6bgs/bg-icecave.jpg',
-		'sprites/gen6bgs/bg-earthycave.jpg',
+		'fx/mail.png',
+		'fx/item.png',
+		'fx/client-bgsheet.png',
 	];
 	for (const t of TYPES) {
 		files.push(`sprites/types/${encodeURIComponent(t)}.png`);
@@ -234,6 +446,14 @@ function buildFixedFileList() {
 		files.push(`sprites/typeicons/${encodeURIComponent(t)}.png`);
 	}
 	for (const c of CATEGORIES) files.push(`sprites/categories/${c}.png`);
+	for (const f of FX_EFFECT_FILES) files.push(`fx/${f}`);
+	for (const theme of CLIENT_BG_THEMES) files.push(`fx/client-bg-${theme}.jpg`);
+	for (const f of BATTLE_BACKDROPS) files.push(`sprites/gen6bgs/${f}`);
+	for (const f of BATTLE_BACKDROPS_OLD_GEN) files.push(`fx/${f}`);
+	for (const f of BATTLE_BACKDROPS_THREE) files.push(`fx/${f}`);
+	for (const f of BATTLE_BACKDROPS_FOUR) files.push(`fx/${f}`);
+	for (const f of BATTLE_BACKDROPS_FIVE) files.push(`fx/${f}`);
+	for (const f of FX_TOUR_BACKDROPS) files.push(`fx/${f}`);
 	return files;
 }
 
@@ -320,12 +540,24 @@ function buildSpeciesFileList(pokedex, dicts, fallbackFamilies) {
 	// looks up animation metadata by the *raw* id, but downloads/displays
 	// under the *spriteid* filename, and several raw ids can share one
 	// spriteid (e.g. cosmetic-only formes) -- so a family/facing counts as
-	// present for a spriteid if any of its raw ids has it.
+	// present for a spriteid if any of its raw ids has it. Also tracks the
+	// *lowest* speciesGenFor() among those raw ids, for old-gen mirroring
+	// below -- lowest because that's the earliest generation this spriteid
+	// could actually need old-gen-specific art for (Math.min(species.gen,
+	// 5) <= N is true, i.e. this dir is reachable, iff at least one raw id
+	// has gen <= N).
 	const rawIdsBySpriteid = new Map();
+	let minGenBySpriteid = new Map();
 	for (const id of Object.keys(pokedex)) {
 		const spriteid = spriteIdFor(id, pokedex[id]);
 		if (!rawIdsBySpriteid.has(spriteid)) rawIdsBySpriteid.set(spriteid, []);
 		rawIdsBySpriteid.get(spriteid).push(id);
+
+		const gen = speciesGenFor(id, pokedex[id]);
+		const prevMin = minGenBySpriteid.get(spriteid);
+		if (gen > 0 && (prevMin === undefined || gen < prevMin)) {
+			minGenBySpriteid.set(spriteid, gen);
+		}
 	}
 
 	const files = [];
@@ -337,6 +569,28 @@ function buildSpeciesFileList(pokedex, dicts, fallbackFamilies) {
 			files.push(`sprites/gen5/${spriteid}-f.png`);
 			files.push(`sprites/gen5-shiny/${spriteid}-f.png`);
 		}
+
+		// Old-gen (1-4) static sprites -- only for spriteids that could
+		// actually appear in a battle of that generation (see
+		// minGenBySpriteid above). undefined here means every raw id
+		// mapping to this spriteid resolved to gen 0 (the
+		// no-'num'-at-all cosmetic-forme edge case in speciesGenFor's own
+		// comment) -- those don't get old-gen treatment at all, matching
+		// how they behave in the real client (see that comment).
+		const minGen = minGenBySpriteid.get(spriteid);
+		if (minGen !== undefined) {
+			for (let n = 1; n <= 4; n++) {
+				if (minGen > n) continue;
+				for (const dir of OLD_GEN_STATIC_DIRS[n]) {
+					files.push(`sprites/${dir}/${spriteid}.png`);
+				}
+				if (n === 4 && hasStaticFrontFemaleVariant(rawIds, dicts, fallbackFamilies)) {
+					files.push(`sprites/gen4/${spriteid}-f.png`);
+					files.push(`sprites/gen4-shiny/${spriteid}-f.png`);
+				}
+			}
+		}
+
 		for (const facing of ['front', 'back']) {
 			files.push(...resolveAnimatedFilesForFacing(spriteid, facing, rawIds, dicts, fallbackFamilies));
 		}
@@ -510,7 +764,8 @@ async function main() {
 		`mirrored: ${stats.downloaded} files, ${(stats.bytes / 1024 / 1024).toFixed(1)} MiB\n` +
 		`missing on CDN: ${stats.missing}\n` +
 		`failed: ${stats.failed}\n` +
-		`static species sprite dirs: ${STATIC_SPECIES_SPRITE_DIRS.join(', ')}\n` +
+		`static species sprite dirs (default gen): ${STATIC_SPECIES_SPRITE_DIRS.join(', ')}\n` +
+		`old-gen static sprite dirs: ${Object.values(OLD_GEN_STATIC_DIRS).flat().join(', ')}\n` +
 		`animated families: ${ANIMATED_FAMILIES.map(f => f.dictExport).join(', ')}` +
 		`${fallbackFamilies.size ? ` (brute-forced: ${[...fallbackFamilies].join(', ')})` : ''}\n` +
 		`trainer avatar files: ${avatarFiles.length}\n` +

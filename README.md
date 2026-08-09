@@ -47,7 +47,7 @@ release and import it again as a new filesystem in iSH-AOK.
 
 ## What "fully offline" actually required
 
-This is not just "run `pokemon-showdown start` and hope." Four separate
+This is not just "run `pokemon-showdown start` and hope." Five separate
 things all independently assume the internet exists, and each needed its
 own fix. All of this was verified directly against the real source (not
 assumed) -- clone the two repos yourself and grep for the things named
@@ -80,6 +80,21 @@ below if you want to check.
    time (see "Sprites and icons" below) -- this is the one piece of the
    offline story that has to happen over the network, and it happens in
    CI, never on-device.
+5. **A handful of images are referenced by a hardcoded *absolute*
+   `https://play.pokemonshowdown.com/...` URL**, in two loaded
+   stylesheets (`style/client2.css`, `style/sim-types.css` -- the
+   Meloetta AFD icons, the avatar-picker thumbnail sheet, and every type
+   icon the newer `typeicon` component renders) and one compiled JS file
+   (`js/panel-popups.js` -- the registration form's captcha image).
+   Unlike everything mirror-sprites.js fetches, these never even *try*
+   the local server, no matter what's mirrored -- so no amount of #4
+   fixes this on its own. Fixed by
+   `patches/showdown-client-css-fixes.patch` for the two stylesheets
+   (source-patchable, applied the same way as
+   `showdown-client-testclient.patch`) and a build-script `sed` for
+   `panel-popups.js` (compiled from TypeScript, so can't be
+   source-patched the same way -- see `30-showdown-client.sh`), both
+   stripping the CDN host to leave a host-relative path.
 
 The server also fixes up the browser's connection at runtime, via the
 same `customhttpresponse` hook in `config.js`: once the client has
@@ -152,11 +167,39 @@ human` -- and resulting state.
   upstream automatically.
 - a small fixed set of non-species images specific UI/battle code
   hardcodes a literal path for: the Substitute-doll sprite, the Mega
-  Evolution/Primal Reversion name-badges, a couple of move-specific
-  battle backgrounds, and the April Fools' Day Meloetta/Digimon art (see
-  the comment above `buildFixedFileList()` in the script for exactly
-  which files and why each one needed grepping the client source to
-  find, rather than being guessable from the pokedex data).
+  Evolution/Primal Reversion name-badges, the April Fools' Day
+  Meloetta/Digimon art, the item/mail battle-log icons, and the
+  background-picker thumbnail sheet (see the comment above
+  `buildFixedFileList()` in the script for exactly which files and why
+  each one needed grepping the client source to find, rather than being
+  guessable from the pokedex data).
+- **the `fx/` hit/impact effect sprites** (`BattleEffects` in
+  `battle-animations.ts`): 58 small images -- fireballs, slashes, wisps,
+  and the like -- that back the large majority of move animations, in
+  every battle. This whole directory was unmirrored before; every
+  animated move effect would have been invisible.
+- **battle backgrounds** -- not just the two a couple of specific move
+  animations switch to, but the *full* default (gen6+) random-pick set of
+  19 (`sprites/gen6bgs/`), which is what gets chosen for every ordinary
+  battle. Only 2 of the 19 were mirrored before, so ~90% of battles would
+  have shown a blank background. Also mirrors the equivalent old-gen
+  (gen1-5) backdrop sets, reachable via the same "2D sprites" setting.
+- **the client's own background theme** (`fx/client-bg-*.jpg` +
+  `fx/client-bgsheet.png`) -- this is the *entire app's* background
+  image, not battle-specific, and defaults to a random pick from these
+  four for every user who hasn't chosen one. Previously unmirrored
+  entirely, meaning the whole app had a broken background by default.
+- **old-gen (gen1-gen4) per-species static sprites** -- reachable not via
+  a client setting but via the battle's own generation, and this build's
+  `start-showdown --format` flag passes straight through to foul-play
+  with no gen restriction (e.g. `--format gen3ou`), so old-gen play is a
+  first-class, one-flag, documented feature here, not a theoretical edge
+  case. Mirrored only for species that could actually appear in a battle
+  of that generation (`speciesGenFor()`, replicating `Species`'s own
+  num-range-based gen inference -- data/pokedex.js has no explicit `gen`
+  field for ~90% of entries). No animation is ever attempted below gen5,
+  and gen1 specifically never gets a shiny variant (Shiny didn't exist
+  yet), both reflected in what gets mirrored.
 - `pokedex-mini.js`/`pokedex-mini-bw.js` -- not images, gender-variant and
   animation-availability metadata `getSpriteData()` reads (also what the
   two families above are keyed off of). These are the two files
@@ -168,13 +211,15 @@ algorithm the client itself uses (copied from `battle-dex-data.ts`'s
 `Species` constructor, not guessed) -- verified against a real build's
 `pokedex.js`: 1517 species, 1503 unique spriteids, spot-checked against
 megas, gigantamax forms, regional forms, totems, and the
-`greninja-bond`/`rockruff-dusk` special cases.
+`greninja-bond`/`rockruff-dusk` special cases. Same for the per-species
+generation (`speciesGenFor()`, used for old-gen mirroring) -- spot-checked
+against 20 species spanning gen1-9 plus a mega and a primal, all matching
+their real generations.
 
 **Deliberately not mirrored** (bounding this to a reasonable size/build
 time -- extend `scripts/mirror-sprites.js`'s `STATIC_SPECIES_SPRITE_DIRS`/
 `buildFixedFileList()` if you want more):
 - audio cries
-- `gen1`-`gen4` sprite directories (only matter for old-gen formats)
 - team-builder-only preview sprites (`home-centered`/`dex`/`xydex` --
   used only while building a team, not during an actual battle)
 - the per-ladder-rank badge icons (`sprites/misc/<formatType>_<type>.png`)

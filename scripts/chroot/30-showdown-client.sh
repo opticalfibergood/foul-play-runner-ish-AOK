@@ -35,7 +35,8 @@ missing=0
 for f in data/pokedex.js data/moves.js data/items.js data/abilities.js \
          data/typechart.js data/aliases.js data/search-index.js \
          data/teambuilder-tables.js data/graphics.js data/text.js \
-         js/client-core.js testclient-new.html favicon-256.png; do
+         js/client-core.js js/panel-popups.js testclient-new.html \
+         favicon-256.png style/client2.css style/sim-types.css; do
     if [ ! -s "play.pokemonshowdown.com/$f" ]; then
         echo "  MISSING: play.pokemonshowdown.com/$f" >&2
         missing=1
@@ -76,6 +77,49 @@ git apply "$PATCH_DIR/showdown-client-testclient.patch"
 
 echo "==> Verifying the patched testclient-new.html (extracted-JS syntax + semantic check)"
 node "$SCRIPT_DIR/verify-testclient-html.js" play.pokemonshowdown.com/testclient-new.html
+
+echo "==> Applying showdown-client-css-fixes.patch"
+# style/client2.css and style/sim-types.css (the two stylesheets
+# testclient-new.html actually loads) hardcode several `url(...)`s as
+# *absolute* https://play.pokemonshowdown.com/... addresses instead of
+# relative ones -- the Meloetta AFD icons, the avatar-picker thumbnail
+# sheet, and every type icon rendered through the newer `typeicon`
+# component. Unlike everything mirror-sprites.js fetches, these never even
+# attempt to load from the local server in the first place, no matter what
+# this build mirrors -- confirmed by grepping every loaded (not just
+# present-in-the-repo) stylesheet for "pokemonshowdown.com" and checking
+# each hit against testclient-new.html's actual <link>/linkStyle() list.
+# The patch strips the CDN host, leaving a host-relative absolute path
+# (`/sprites/...`) that resolves against whatever's currently serving the
+# page -- our own server here.
+if ! git apply --check "$PATCH_DIR/showdown-client-css-fixes.patch" 2>/tmp/patch-check.err; then
+    echo "error: showdown-client-css-fixes.patch no longer applies cleanly to pokemon-showdown-client@${CLIENT_COMMIT}" >&2
+    cat /tmp/patch-check.err >&2
+    echo "style/client2.css or style/sim-types.css has likely changed upstream; the patch needs updating." >&2
+    exit 1
+fi
+git apply "$PATCH_DIR/showdown-client-css-fixes.patch"
+if grep -q "pokemonshowdown\.com/sprites\|pokemonshowdown\.com/fx" play.pokemonshowdown.com/style/client2.css play.pokemonshowdown.com/style/sim-types.css; then
+    echo "error: an absolute CDN url(...) survived showdown-client-css-fixes.patch -- the patch is stale" >&2
+    exit 1
+fi
+
+echo "==> Fixing the one hardcoded absolute-URL image left in compiled JS"
+# js/panel-popups.js (built from panel-popups.tsx, which is TypeScript
+# source -- can't be patches/*.patch'd pre-build the way the two static
+# CSS files above are, so this is a plain post-build string replacement
+# instead) has one hardcoded absolute URL: the registration form's
+# "what is this pokemon?" captcha image. Same bug as the CSS ones above,
+# same fix (strip the CDN host). Confirmed the string survives verbatim
+# (not minified away) into the actual built, loaded file, not just present
+# in the TS source.
+PIKACHU_CAPTCHA_FILE="play.pokemonshowdown.com/js/panel-popups.js"
+PIKACHU_CAPTCHA_COUNT="$(grep -o 'https://play\.pokemonshowdown\.com/sprites/gen5ani/pikachu\.gif' "$PIKACHU_CAPTCHA_FILE" | wc -l | tr -d ' ')"
+if [ "$PIKACHU_CAPTCHA_COUNT" != "1" ]; then
+    echo "error: expected exactly one hardcoded pikachu.gif captcha URL in $PIKACHU_CAPTCHA_FILE, found $PIKACHU_CAPTCHA_COUNT -- panel-popups.tsx has likely changed upstream" >&2
+    exit 1
+fi
+sed -i 's#https://play\.pokemonshowdown\.com/sprites/gen5ani/pikachu\.gif#/sprites/gen5ani/pikachu.gif#' "$PIKACHU_CAPTCHA_FILE"
 
 echo "==> Mirroring sprites/icons from the real CDN (build-time only, see"
 echo "    scripts/mirror-sprites.js for exactly what is and isn't fetched)"
@@ -123,6 +167,8 @@ cat > /opt/pokemon-showdown/server/static/BUILD_INFO.txt <<EOF
 pokemon-showdown-client ref: $CLIENT_REF
 pokemon-showdown-client commit: $CLIENT_COMMIT
 patched: testclient-new.html (patches/showdown-client-testclient.patch)
+patched: style/client2.css, style/sim-types.css (patches/showdown-client-css-fixes.patch)
+patched: js/panel-popups.js (build-script sed, see 30-showdown-client.sh)
 sprite mirror: see SPRITE_MIRROR_INFO.txt in this same directory
 EOF
 cat /opt/pokemon-showdown/server/static/BUILD_INFO.txt
