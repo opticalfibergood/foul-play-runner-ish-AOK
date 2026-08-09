@@ -48,6 +48,47 @@ echo "==> foul-play import sanity check"
 chroot "$TMP" /opt/foul-play/venv/bin/python3 -c \
     "import poke_engine, fp.main, fp.websocket_client; print('poke_engine OK:', poke_engine.__file__)"
 
+echo "==> poke-engine variants: each one imports cleanly on its own"
+for feature in gen1 gen2 gen3 gen4 gen5 gen6 gen7 gen8 terastallization champions; do
+    variant_dir="/opt/foul-play/poke-engine-variants/$feature"
+    if ! chroot "$TMP" test -d "$variant_dir"; then
+        echo "error: expected poke-engine variant directory missing: $variant_dir" >&2
+        exit 1
+    fi
+    chroot "$TMP" /usr/bin/env -i PYTHONPATH="$variant_dir" \
+        /opt/foul-play/venv/bin/python3 -c \
+        "import poke_engine; print('poke_engine ($feature) OK:', poke_engine.__file__)"
+done
+
+echo "==> foul-play launcher: --pokemon-format selects the right poke-engine variant"
+# FOUL_PLAY_VARIANT_DEBUG=1 makes the /usr/local/bin/foul-play wrapper
+# print the variant it would have used and exit, instead of actually
+# starting a battle -- see its own comments in 10-foulplay.sh.
+check_variant_selection() {
+    fmt="$1"
+    want="$2"
+    got="$(chroot "$TMP" /usr/bin/env -i FOUL_PLAY_VARIANT_DEBUG=1 \
+        /usr/local/bin/foul-play --pokemon-format "$fmt" --websocket-uri ws://x \
+        --ps-username bot --bot-mode accept_challenge)"
+    if [ "$got" != "$want" ]; then
+        echo "error: --pokemon-format $fmt selected poke-engine variant '$got', expected '$want'" >&2
+        exit 1
+    fi
+    echo "  --pokemon-format $fmt -> $got (OK)"
+}
+check_variant_selection gen1ou gen1
+check_variant_selection gen2ou gen2
+check_variant_selection gen3ou gen3
+check_variant_selection gen4ou gen4
+check_variant_selection gen5ou gen5
+check_variant_selection gen6ou gen6
+check_variant_selection gen7ou gen7
+check_variant_selection gen8ou gen8
+check_variant_selection gen9ou terastallization
+check_variant_selection gen9randombattle terastallization
+check_variant_selection gen9championsrandombattle champions
+check_variant_selection gen9championsou champions
+
 echo "==> starting the bundled showdown server briefly"
 chroot "$TMP" /usr/bin/env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     sh -c 'cd /opt/pokemon-showdown && node pokemon-showdown start --skip-build 8000' &

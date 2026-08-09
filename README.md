@@ -36,7 +36,10 @@ the device, and no build tools ever running on-device.
    be logged in as `human`. Challenge `bot` -- it auto-accepts.
 
 `start-showdown --help` lists options (`--port`, `--bot-mode`, `--format`,
-`--no-bot`). Ctrl-C stops both the server and the bot.
+`--no-bot`). Ctrl-C stops both the server and the bot. `--format` isn't
+limited to the gen9 default -- `--format gen3ou`, `--format gen1ou`,
+`--format gen9championsrandombattle`, etc. all play with the actually
+correct battle mechanics (see "Old-gen and Champions battles" below).
 
 `foul-play` still works completely unchanged on its own too (e.g. against
 the real ladder, over the internet): `foul-play --help`.
@@ -137,6 +140,57 @@ problem (`101 Switching Protocols` with the correct
 object confirming the injected script's actual call order --
 `worker.postMessage('disconnect')` then `reconnect()` then `/trn
 human` -- and resulting state.
+
+## Old-gen and Champions battles (poke-engine variants)
+
+Getting sprites/backgrounds right for old-gen battles (see below) turned
+out not to be the whole story -- the bot itself couldn't actually *play*
+them correctly.
+
+`foul-play`'s battle AI calls into
+[`poke-engine`](https://github.com/pmariglia/poke-engine), a separate
+Rust project, to search through a battle. `poke-engine` picks its
+generation's mechanics at **compile time**, not runtime: confirmed
+directly against its own source (`Cargo.toml`'s `[features]` table has
+`gen1`..`gen9`, `champions`, and `terastallization` -- which
+`Cargo.toml` declares implies `gen9` -- and `src/lib.rs` has an
+`assert_unique_feature!()` macro that's a hard `compile_error!` if more
+than one of `gen2`..`gen9`/`champions` is enabled at once). A single
+`pip install poke-engine --config-settings=...--features
+poke-engine/X` can only ever produce an engine that plays generation
+`X` -- which is exactly why upstream foul-play's own README has a whole
+"Re-Installing the Engine" section on rebuilding it per generation, and
+why its `requirements.txt` pins exactly one feature
+(`terastallization`, i.e. gen9) by default.
+
+Built the naive way, this rootfs would therefore only ever be able to
+correctly play gen9 (and not even `[Gen 9 Champions]` formats, which
+need the separate `champions` feature) -- `start-showdown --format
+gen3ou` would connect and battle, but against a `poke-engine` that's
+silently computing gen9 mechanics the whole time. Wrong results, not a
+crash, since `poke-engine` has no way to know it was asked for the
+wrong generation.
+
+Fixed without touching a single line of foul-play's own source
+(`scripts/chroot/10-foulplay.sh`, `/usr/local/bin/foul-play`): since
+`poke-engine`'s Python package is self-contained (a pure-Python
+`__init__.py` wrapping one compiled extension module, no other runtime
+deps), the build installs it once per feature --
+`gen1`..`gen8`, `terastallization` (gen9), and `champions` -- each into
+its own directory under `poke-engine-variants/`, alongside the venv's
+normal install. The `/usr/local/bin/foul-play` launcher (this build's
+own wrapper, not foul-play's `run.py`) then parses whatever
+`--pokemon-format` was actually passed, works out the matching
+generation the same way foul-play's own `fp/format_spec.py` does (a
+`gen([1-9]0?)` regex plus a literal `"champions"` substring check), and
+prepends that one variant's directory onto `PYTHONPATH` before handing
+off to `run.py` -- shadowing the venv's own default `poke-engine`
+install for just that one process. `start-showdown --format gen3ou`,
+`--format gen1ou`, `--format gen9championsrandombattle`, etc. all now
+load the actually-correct engine. If a format can't be parsed for some
+reason, it falls back to whatever `poke-engine` the venv has installed
+by default -- the same behavior as before this fix, not a new failure
+mode.
 
 ## Sprites and icons
 
@@ -303,8 +357,10 @@ hoped-for.
 ## No build-only tooling in the final image
 
 - **foul-play**: `rust`/`cargo`/`build-base` etc. are removed after
-  `poke-engine` is compiled into the venv (same as before this feature was
-  added).
+  `poke-engine` is compiled into the venv -- now once for the venv's own
+  default install, plus once more per generation/Champions variant (see
+  "Old-gen and Champions battles" above) -- same as before this feature
+  was added, just more compiles before the toolchain gets removed.
 - **pokemon-showdown**: `npm prune --omit=dev` drops `typescript`,
   `eslint`, `mocha`, and the other 11 devDependencies. The TypeScript
   source itself is removed too -- `sim/`, `data/`, `lib/`, `tools/`,

@@ -26,9 +26,16 @@ on:
         default: "3.23.3"
       poke_engine_gen:
         description: >
-          poke-engine generation feature to compile in. "default" keeps
-          whatever foul-play's requirements.txt already pins (currently
-          gen9 / terastallization).
+          poke-engine generation feature for the venv's OWN default
+          install only -- every generation (gen1-gen9) plus Champions is
+          always built as its own variant regardless of this input, and
+          start-showdown/foul-play picks the right one per-battle from
+          --pokemon-format (see README "Old-gen and Champions battles").
+          This only changes: (1) what an unparseable --pokemon-format
+          falls back to, and (2) what a direct `venv/bin/python3 run.py`
+          invocation that bypasses the /usr/local/bin/foul-play wrapper
+          gets. "default" keeps whatever foul-play's requirements.txt
+          already pins (currently gen9 / terastallization).
         type: choice
         default: default
         options:
