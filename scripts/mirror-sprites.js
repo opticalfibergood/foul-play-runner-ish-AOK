@@ -248,6 +248,12 @@ const { setTimeout: sleep } = require('node:timers/promises');
 const CDN = 'https://play.pokemonshowdown.com';
 const OUT_DIR = process.argv[2];
 const CONCURRENCY = Number(process.env.MIRROR_CONCURRENCY || 8);
+// Per-attempt deadline for a single fetch (not the retry loop as a whole --
+// each of the 3 attempts in downloadOne gets its own fresh FETCH_TIMEOUT_MS).
+// Not exposed as an env var like MIRROR_CONCURRENCY: this is a correctness
+// backstop (turn a hang into a retryable failure), not a knob anyone should
+// need to tune for a given run the way concurrency legitimately is.
+const FETCH_TIMEOUT_MS = 30_000;
 
 if (!OUT_DIR) {
 	console.error('usage: mirror-sprites.mjs <path to built play.pokemonshowdown.com dir>');
@@ -708,9 +714,20 @@ async function downloadOne(relPath, stats) {
 	}
 
 	for (let attempt = 1; attempt <= 3; attempt++) {
+		// A stalled connection -- the CDN accepts it but then never finishes
+		// sending a response, more likely now at MIRROR_CONCURRENCY=24 than
+		// it was at the old default of 8 -- doesn't reject fetch() on its
+		// own; without an explicit deadline it just hangs forever, and since
+		// nothing ever throws, the catch block below (and the retry/failure
+		// accounting it does) never runs either. One stuck request would
+		// permanently occupy a pool() slot rather than counting as a
+		// failure like every other broken response already does.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 		try {
 			const res = await fetch(url, {
 				headers: { 'User-Agent': 'foul-play-ish-aok sprite mirror (build-time only)' },
+				signal: controller.signal,
 			});
 			if (res.status === 404) {
 				stats.missing++;
@@ -726,12 +743,20 @@ async function downloadOne(relPath, stats) {
 			stats.bytes += buf.length;
 			return;
 		} catch (err) {
+			// AbortController's own rejection is a plain DOMException named
+			// 'AbortError' with a generic "This operation was aborted"
+			// message -- worth relabeling here so a timeout shows up in
+			// failedList (and the console) as an actual timeout, not an
+			// unexplained abort.
+			const message = err.name === 'AbortError' ? `timed out after ${FETCH_TIMEOUT_MS / 1000}s` : err.message;
 			if (attempt === 3) {
 				stats.failed++;
-				stats.failedList.push(`${relPath}: ${err.message}`);
+				stats.failedList.push(`${relPath}: ${message}`);
 				return;
 			}
 			await sleep(300 * attempt);
+		} finally {
+			clearTimeout(timeout);
 		}
 	}
 }
