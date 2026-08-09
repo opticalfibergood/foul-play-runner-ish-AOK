@@ -253,7 +253,15 @@ echo "==> Removing build-only packages (this is the point of no return for"
 echo "    rebuilding anything on-device -- everything past here is runtime-only)"
 apk del rust cargo build-base musl-dev linux-headers python3-dev \
         openssl-dev libffi-dev git patch php npm
-rm -rf /var/cache/apk/* /root/.cargo /root/.cache /root/.npm
+# /root/.npm and /root/.cargo-target (cargo's build-artifact output, not
+# its registry cache -- see build-rootfs.sh for why those are different
+# paths and why only one of them is worth caching) are deliberately left
+# in place here rather than deleted: build-rootfs.sh extracts them for
+# actions/cache on the host side, once this chroot has exited and they're
+# reachable outside it, then deletes them from the rootfs itself before
+# packaging. Deleting them here, inside the chroot, would remove them
+# before that extraction ever gets a chance to run.
+rm -rf /var/cache/apk/* /root/.cargo /root/.cache
 
 echo "==> Writing default resolv.conf (the one build-rootfs.sh borrowed was the CI host's)"
 printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' > /etc/resolv.conf

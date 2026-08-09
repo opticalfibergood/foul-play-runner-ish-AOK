@@ -8,9 +8,9 @@ on:
   # against whatever foul-play/pokemon-showdown/pokemon-showdown-client
   # currently are on their respective *_REF. Scheduled runs have no
   # workflow inputs, so they always use the default runner
-  # (ubuntu-24.04-arm) -- if this repo is private, either trigger via
-  # workflow_dispatch with a blacksmith-*-arm runner instead, or edit the
-  # fallback below.
+  # (ubuntu-24.04-arm, 4 vCPU on a public repo, 2 vCPU on a private one) --
+  # for 4 vCPU on a private repo too, trigger via workflow_dispatch with a
+  # blacksmith-*-arm runner instead, or edit the fallback below.
   schedule:
     - cron: "17 6 * * *"
 
@@ -57,10 +57,11 @@ on:
       runner:
         description: >
           Runner label. ubuntu-24.04-arm/ubuntu-22.04-arm are GitHub's own
-          free, native aarch64 hosted runners -- but ONLY on public repos
-          (they fail outright on private repos). If this repo is private,
-          pick a blacksmith-*-arm label instead (needs the Blacksmith
-          GitHub App installed; see README).
+          native aarch64 hosted runners -- free on both public repos (4
+          vCPU) and private repos (2 vCPU). Pick a blacksmith-*-arm label
+          instead for 4 vCPU on a private repo, or for dedicated capacity
+          rather than a shared pool (needs the Blacksmith GitHub App
+          installed; see README).
         type: choice
         default: ubuntu-24.04-arm
         options:
@@ -104,6 +105,28 @@ jobs:
       CLIENT_REF: ${{ github.event.inputs.client_ref || 'master' }}
     steps:
       - uses: actions/checkout@v4
+
+      # Caches cargo's compiled build-artifact output (poke-engine's ~30s
+      # compile on a real run, not crate *downloads* -- those are already
+      # near-instant, see build-rootfs.sh) and npm's package cache. The
+      # actual paths involved live inside the chroot's rootfs, which
+      # build-rootfs.sh deletes and rebuilds from scratch every run --
+      # .ci-cache is a separate, persistent directory it seeds the fresh
+      # rootfs from and re-extracts into before packaging, specifically so
+      # there's something stable here for actions/cache to follow across
+      # runs. See build-rootfs.sh's own comments on CI_CACHE_DIR for why.
+      #
+      # The primary key always includes run_id, so it never already
+      # exists and a save always happens at the end of a successful job;
+      # restore-keys does the actual work of finding the closest previous
+      # cache to warm-start from.
+      - uses: actions/cache@v4
+        with:
+          path: .ci-cache
+          key: ci-cache-${{ runner.os }}-${{ github.event.inputs.poke_engine_gen || 'default' }}-${{ github.event.inputs.foul_play_ref || 'main' }}-${{ github.event.inputs.showdown_ref || 'master' }}-${{ github.event.inputs.client_ref || 'master' }}-${{ github.run_id }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{ github.event.inputs.poke_engine_gen || 'default' }}-${{ github.event.inputs.foul_play_ref || 'main' }}-${{ github.event.inputs.showdown_ref || 'master' }}-${{ github.event.inputs.client_ref || 'master' }}-
+            ci-cache-${{ runner.os }}-
 
       - name: Build the rootfs
         run: sudo -E ./scripts/build-rootfs.sh

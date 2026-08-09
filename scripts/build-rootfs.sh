@@ -50,6 +50,24 @@ CLIENT_REF="${CLIENT_REF:-master}"
 # Left as a named constant for readability, not exposed as a workflow
 # input, on purpose.
 SHOWDOWN_PORT="${SHOWDOWN_PORT:-8000}"
+# mirror-sprites.js defaults to 8 (a sane default for someone running it
+# by hand off a home connection). Measured on a real CI run: 87.3s for
+# ~17k files at concurrency 8, almost entirely latency- rather than
+# bandwidth-bound -- a hosted CI runner has headroom to go higher. Started
+# at 24, not higher, since this hasn't been tuned against the real CDN's
+# actual rate-limit tolerance from outside a live run; mirror-sprites.js's
+# own 5%-failure-rate abort (see its own comments) is the backstop if this
+# turns out to be too aggressive.
+MIRROR_CONCURRENCY="${MIRROR_CONCURRENCY:-24}"
+# Cargo's own build-artifact cache normally lives under a per-invocation
+# temp directory (pip's own build isolation puts it under
+# /tmp/pip-install-<random>/..., a different path every run), which is
+# useless as an actions/cache target since the key would never match
+# between runs. Pointing it at a fixed path makes the compiled poke-engine
+# build cacheable across runs -- crate *downloads* are already fast
+# (well under a second on a real run; crates.io itself isn't the
+# bottleneck), it's the ~30s compile this is actually meant to save.
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/root/.cargo-target}"
 
 # The workflow_dispatch dropdown's "default" choice (meaning "don't override
 # anything") arrives here as the literal string "default" -- normalize it,
@@ -64,9 +82,19 @@ ROOT_DIR="$(cd "$HOST_SCRIPT_DIR/.." && pwd)"
 WORK_DIR="$ROOT_DIR/build"
 ROOTFS="$WORK_DIR/rootfs"
 OUT_DIR="$ROOT_DIR/out"
+# Deliberately NOT under WORK_DIR: it gets rm -rf'd fresh on every single
+# run below, which is correct for the rootfs itself but would make an
+# actions/cache target pointed anywhere under it useless -- restore, then
+# immediately delete what was just restored, every run, forever. This
+# directory is a sibling of WORK_DIR instead, seeded into the fresh
+# rootfs after extraction and re-extracted from it (see steps 5 and 5.5
+# below) before that rootfs gets packaged and shipped -- the actual
+# npm/cargo state a CI cache should follow lives here across runs, not
+# inside the ephemeral build tree.
+CI_CACHE_DIR="${CI_CACHE_DIR:-$ROOT_DIR/.ci-cache}"
 
 rm -rf "$WORK_DIR" "$OUT_DIR"
-mkdir -p "$ROOTFS" "$OUT_DIR"
+mkdir -p "$ROOTFS" "$OUT_DIR" "$CI_CACHE_DIR"
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -154,6 +182,20 @@ mkdir -p "$ROOTFS/build-input"
 cp -r "$HOST_SCRIPT_DIR" "$ROOTFS/build-input/scripts"
 cp -r "$ROOT_DIR/patches" "$ROOTFS/build-input/patches"
 
+# Seed from a previous run's cache, if actions/cache (or a local rerun)
+# restored one into CI_CACHE_DIR -- a cold run just finds nothing here and
+# proceeds exactly as before. Sizeable local `cp -a`s, not network I/O, so
+# this costs real seconds, not minutes, either way.
+mkdir -p "$ROOTFS/root"
+if [ -d "$CI_CACHE_DIR/cargo-target" ]; then
+    log "Seeding cargo's build cache from a previous run"
+    cp -a "$CI_CACHE_DIR/cargo-target" "$ROOTFS/root/.cargo-target"
+fi
+if [ -d "$CI_CACHE_DIR/npm" ]; then
+    log "Seeding npm's cache from a previous run"
+    cp -a "$CI_CACHE_DIR/npm" "$ROOTFS/root/.npm"
+fi
+
 chroot "$ROOTFS" /usr/bin/env -i \
     HOME=/root \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -163,12 +205,36 @@ chroot "$ROOTFS" /usr/bin/env -i \
     SHOWDOWN_REF="$SHOWDOWN_REF" \
     CLIENT_REF="$CLIENT_REF" \
     SHOWDOWN_PORT="$SHOWDOWN_PORT" \
+    MIRROR_CONCURRENCY="$MIRROR_CONCURRENCY" \
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     PATCH_DIR=/build-input/patches \
     SCRIPT_DIR=/build-input/scripts \
     /bin/sh /build-input/scripts/chroot-main.sh
 
 cp "$ROOTFS/BUILD_INFO.txt" "$OUT_DIR/BUILD_INFO.txt"
 rm -rf "$ROOTFS/build-input"
+
+# ---------------------------------------------------------------------------
+# 5.5. Pull the (possibly-updated) cargo/npm state back out for next run's
+#      cache, then remove it from the rootfs -- 40-launchers-and-cleanup.sh
+#      deliberately leaves these two in place instead of deleting them
+#      itself, since it runs *inside* the chroot and has no way to reach
+#      CI_CACHE_DIR on the host. This has to happen before packaging
+#      (step 7) either way: these are build artifacts, not something an
+#      end-user's device needs, same reasoning as everything else that
+#      step already strips.
+# ---------------------------------------------------------------------------
+log "Extracting cargo/npm state for next run's cache"
+if [ -d "$ROOTFS/root/.cargo-target" ]; then
+    rm -rf "$CI_CACHE_DIR/cargo-target"
+    cp -a "$ROOTFS/root/.cargo-target" "$CI_CACHE_DIR/cargo-target"
+    rm -rf "$ROOTFS/root/.cargo-target"
+fi
+if [ -d "$ROOTFS/root/.npm" ]; then
+    rm -rf "$CI_CACHE_DIR/npm"
+    cp -a "$ROOTFS/root/.npm" "$CI_CACHE_DIR/npm"
+    rm -rf "$ROOTFS/root/.npm"
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Unmount before packaging, or we'd tar up the host's /proc, /sys, /dev.

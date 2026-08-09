@@ -6,6 +6,8 @@ set -eu
 CLIENT_REF="${CLIENT_REF:-master}"
 PATCH_DIR="${PATCH_DIR:-/build-input/patches}"
 SCRIPT_DIR="${SCRIPT_DIR:-/build-input/scripts}"
+SRC_READY_MARKER=/tmp/.pokemon-showdown-src-ready
+STEP20_CLONE_READY_MARKER=/tmp/.step20-clone-ready
 
 echo "==> Cloning pokemon-showdown-client (ref: ${CLIENT_REF})"
 git clone --depth 1 --branch "$CLIENT_REF" https://github.com/smogon/pokemon-showdown-client.git /opt/pokemon-showdown-client
@@ -15,10 +17,22 @@ CLIENT_COMMIT="$(git rev-parse HEAD)"
 echo "==> npm install (full -- devDependencies needed to build)"
 npm install --no-audit --no-fund
 
-echo "==> node build full (data files + TS compile; also clones+builds its"
-echo "    own throwaway pokemon-showdown copy under caches/ to extract dex"
-echo "    data -- this is normal, confirmed by reading build-tools/build-indexes"
-echo "    directly, and that copy is deleted below once this step is done)"
+echo "==> Waiting for 15-showdown-src.sh's shared clone+install"
+while [ ! -f "$SRC_READY_MARKER" ]; do sleep 1; done
+
+echo "==> Seeding caches/pokemon-showdown from the shared checkout (see"
+echo "    15-showdown-src.sh -- build-tools/build-indexes clones its own"
+echo "    copy here ONLY if this directory doesn't already exist yet, and"
+echo "    otherwise just does a fast no-op 'git pull' + 'npm run build' on"
+echo "    whatever it finds -- confirmed by reading that file directly."
+echo "    Pre-seeding it here turns that ~2-minute clone+install into a"
+echo "    local copy)"
+mkdir -p caches
+cp -a /opt/pokemon-showdown-src caches/pokemon-showdown
+
+echo "==> node build full (data files + TS compile; build-tools/build-indexes"
+echo "    also runs 'npm run build' on the seeded copy above to extract dex"
+echo "    data -- that copy is deleted below once this step is done)"
 # node build full's *own* exit code isn't trustworthy as a pass/fail signal
 # on its own: a late, unrelated step (regenerating index.php files for the
 # *other* pokemonshowdown.com properties we don't even use) can exit
@@ -131,6 +145,13 @@ mv play.pokemonshowdown.com/* /opt/pokemon-showdown-client-static/
 CLIENT_VERSION_FILE=/opt/pokemon-showdown-client-static/version.txt
 [ -f "$CLIENT_VERSION_FILE" ] || echo "unknown" > "$CLIENT_VERSION_FILE"
 
+echo "==> Waiting for 20-showdown-server.sh's copy to be in place"
+# Only needs 20's cp -a to have landed (server/static/ is checked into the
+# repo, not a build output) -- not for 20 to have finished building or
+# pruning, which is why this polls a marker touched right after that copy
+# rather than depending on the whole of step 20.
+while [ ! -f "$STEP20_CLONE_READY_MARKER" ]; do sleep 1; done
+
 echo "==> Merging into the server: server/static -> the built client"
 # A real move/copy, not a symlink. server/static previously being a
 # symlink is suspected of not resolving reliably through iSH-AOK's fakefs
@@ -156,10 +177,10 @@ rm -rf /opt/pokemon-showdown/server/static
 mv /opt/pokemon-showdown-client-static /opt/pokemon-showdown/server/static
 
 echo "==> Removing the entire pokemon-showdown-client repo checkout"
-echo "    (node_modules, caches/pokemon-showdown [a full second copy of the"
-echo "    server, build-only], build-tools/, TS src/, and everything else"
-echo "    outside play.pokemonshowdown.com/ was only ever needed to produce"
-echo "    the static output already moved into place above)"
+echo "    (node_modules, caches/pokemon-showdown [seeded from the shared"
+echo "    checkout above, build-only], build-tools/, TS src/, and everything"
+echo "    else outside play.pokemonshowdown.com/ was only ever needed to"
+echo "    produce the static output already moved into place above)"
 cd /
 rm -rf /opt/pokemon-showdown-client
 

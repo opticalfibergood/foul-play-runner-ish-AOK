@@ -4,14 +4,25 @@ set -eu
 
 SHOWDOWN_REF="${SHOWDOWN_REF:-master}"
 PATCH_DIR="${PATCH_DIR:-/build-input/patches}"
+SRC_READY_MARKER=/tmp/.pokemon-showdown-src-ready
+CLONE_READY_MARKER=/tmp/.step20-clone-ready
 
-echo "==> Cloning pokemon-showdown (ref: ${SHOWDOWN_REF})"
-git clone --depth 1 --branch "$SHOWDOWN_REF" https://github.com/smogon/pokemon-showdown.git /opt/pokemon-showdown
+echo "==> Waiting for 15-showdown-src.sh's shared clone+install"
+while [ ! -f "$SRC_READY_MARKER" ]; do sleep 1; done
+
+echo "==> Copying the shared pokemon-showdown checkout into place (see"
+echo "    15-showdown-src.sh -- this used to be its own separate clone +"
+echo "    npm install, ~2 minutes; a local copy of an already-installed"
+echo "    checkout is seconds)"
+cp -a /opt/pokemon-showdown-src /opt/pokemon-showdown
 cd /opt/pokemon-showdown
 SHOWDOWN_COMMIT="$(git rev-parse HEAD)"
-
-echo "==> npm install (full -- devDependencies are needed to actually build)"
-npm install --no-audit --no-fund
+# 30 needs this directory to exist (specifically server/static/, a
+# checked-in dir, not a build output) before its own final merge step --
+# touch this the moment the copy lands, well before build/prune below,
+# since 30 polls for it independently rather than waiting on this whole
+# script to finish.
+touch "$CLONE_READY_MARKER"
 
 echo "==> node build (compiles TypeScript -> dist/, via esbuild + libc6-compat)"
 node build
