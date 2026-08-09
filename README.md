@@ -177,7 +177,24 @@ human` -- and resulting state.
   `battle-animations.ts`): 58 small images -- fireballs, slashes, wisps,
   and the like -- that back the large majority of move animations, in
   every battle. This whole directory was unmirrored before; every
-  animated move effect would have been invisible.
+  animated move effect would have been invisible. This also covers every
+  hazard/screen that gets a real sprite -- Stealth Rock, Spikes, Toxic
+  Spikes, Sticky Web, G-Max Steel Surge (Reflect, Light Screen, Aurora
+  Veil, Safeguard, and Mist are CSS-only in the client, no image needed).
+- **field-condition overlays**: weather (Sun/Rain/Sandstorm/Hail-or-Snow/
+  Strong Winds), all four terrains (Electric/Grassy/Misty/Psychic), and
+  the three "room" moves (Trick Room, Magic Room, Wonder Room) plus
+  Gravity -- 13 `fx/weather-*.{jpg,png}` files. These never go through
+  `BattleEffects` at all -- the client just swaps a CSS class (e.g.
+  `raindanceweather`, `trickroomweather`) on a persistent overlay div, and
+  `style/battle.css` supplies each class's background image directly --
+  so the grep that finds the `fx/` effect sprites above could never have
+  caught these, and they were completely unmirrored before. That meant
+  every one of these field conditions rendered as a blank overlay (status
+  text only, no art) for the entire duration it was active, in every
+  battle. `style/battle.css`'s URLs here are already host-relative
+  (`../fx/...`), unlike the two stylesheets `showdown-client-css-fixes.patch`
+  fixes, so no patch is needed for this -- only mirroring the files.
 - **battle backgrounds** -- not just the two a couple of specific move
   animations switch to, but the *full* default (gen6+) random-pick set of
   19 (`sprites/gen6bgs/`), which is what gets chosen for every ordinary

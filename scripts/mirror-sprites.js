@@ -126,6 +126,30 @@
  *     formatType/type combinations isn't small/fixed the way mega/alpha/
  *     omega is, so there's nothing concrete yet to add to the file list
  *     here. Revisit if this build ever gets real ladder data.
+ *   - **field-condition overlays**: weather (Sun/Rain/Sandstorm/Hail-Snow/
+ *     Strong Winds), the four terrains (Electric/Grassy/Misty/Psychic), and
+ *     the three "room" moves (Trick Room, Magic Room, Wonder Room) plus
+ *     Gravity -- 13 fx/weather-*.{jpg,png} files (FX_FIELD_CONDITION_FILES
+ *     below). These are a genuinely different code path from the fx/
+ *     hit-effect sprites just above: addWeather()/updateWeather() never
+ *     constructs a `new Sprite(BattleEffects.xyz, ...)` for these, it just
+ *     swaps a CSS class (e.g. `raindanceweather`, `trickroomweather`) on a
+ *     persistent overlay div, and style/battle.css is what actually
+ *     supplies each class's background-image -- so grepping
+ *     battle-animations.ts's `url:` table (how the fx/ list above was
+ *     built) could never have found these; they were completely unmirrored
+ *     before, meaning weather/terrain/Trick Room-and-friends showed as a
+ *     blank overlay (just the status text) in every battle. Confirmed by
+ *     grepping style/battle.css directly for every `url(../fx/weather-...)`
+ *     rule. Unlike the client2.css/sim-types.css bugs
+ *     showdown-client-css-fixes.patch fixes, battle.css's URLs here are
+ *     already host-relative (`../fx/...`), so no patch is needed, only
+ *     mirroring. (Hazard/screen sprites -- Spikes, Stealth Rock, Toxic
+ *     Spikes, Sticky Web, G-Max Steel Surge -- *do* go through
+ *     BattleEffects and were already covered by the fx/ list above; Reflect/
+ *     Light Screen/Aurora Veil/Safeguard/Mist are CSS-only `rawHTML`
+ *     entries in that same table with no image at all, so correctly need
+ *     nothing mirrored for them either.)
  *   - per-species battle sprites, front+back, normal+shiny -- BOTH the
  *     static PNGs (the "gen5" family, always mirrored as the ultimate
  *     fallback) AND the animated GIFs, in whichever of the two families
@@ -357,6 +381,40 @@ const FX_EFFECT_FILES = [
 	'shine.png', 'stare.png', 'sword.png', 'topbite.png', 'ultra.png',
 	'waterwisp.png', 'web.png', 'wisp.png', 'z-symbol.png',
 ];
+// Hazards/screens (stealth rock, spikes, toxic spikes, sticky web, mist,
+// reflect, light screen, aurora veil, safeguard, gmax steel surge) are
+// covered above -- those all go through BattleEffects, so the FX_EFFECT_FILES
+// grep already catches every one that has a real image (the rest, like
+// reflect/lightscreen/mist/safeguard/auroraveil, are CSS-only `rawHTML`
+// entries in that same table with no `url` at all, confirmed by reading each
+// entry directly, so correctly absent here too).
+//
+// Weather, terrain, and the three "room" moves are a *different* code path
+// and were completely missed by every earlier version of this script: they
+// never go through BattleEffects (no `.weather`-div sprite is ever
+// constructed with `new Sprite(BattleEffects.xyz, ...)` for these), so
+// grepping battle-animations.ts's `url:` table -- how FX_EFFECT_FILES above
+// was built -- cannot find them. Instead, addWeather()/updateWeather() (see
+// this.$weather/this.$terrain in battle-animations.ts) just swap the CSS
+// class on a persistent overlay div (e.g. `raindanceweather`,
+// `electricterrainweather`, `trickroomweather`), and style/battle.css is
+// what actually supplies each class's background-image -- confirmed by
+// grepping battle.css directly for every `url(../fx/weather-...)` rule.
+// Unlike the client2.css/sim-types.css bugs showdown-client-css-fixes.patch
+// fixes, these are already host-relative (`../fx/...`, not an absolute
+// `https://play.pokemonshowdown.com/...`), so no patch is needed here --
+// they just need to actually be mirrored, which this list does.
+const FX_FIELD_CONDITION_FILES = [
+	// weather
+	'weather-sunnyday.jpg', 'weather-raindance.jpg', 'weather-sandstorm.png',
+	'weather-hail.png', 'weather-strongwind.png',
+	// terrain
+	'weather-mistyterrain.png', 'weather-electricterrain.png',
+	'weather-grassyterrain.png', 'weather-psychicterrain.png',
+	// room effects (Gravity, Magic Room, Trick Room, Wonder Room)
+	'weather-gravity.png', 'weather-magicroom.png', 'weather-trickroom.png',
+	'weather-wonderroom.png',
+];
 
 // PSBackground's (client-core.ts) four selectable "Official" background
 // themes -- this is the *entire app's* background image, not
@@ -447,6 +505,7 @@ function buildFixedFileList() {
 	}
 	for (const c of CATEGORIES) files.push(`sprites/categories/${c}.png`);
 	for (const f of FX_EFFECT_FILES) files.push(`fx/${f}`);
+	for (const f of FX_FIELD_CONDITION_FILES) files.push(`fx/${f}`);
 	for (const theme of CLIENT_BG_THEMES) files.push(`fx/client-bg-${theme}.jpg`);
 	for (const f of BATTLE_BACKDROPS) files.push(`sprites/gen6bgs/${f}`);
 	for (const f of BATTLE_BACKDROPS_OLD_GEN) files.push(`fx/${f}`);
