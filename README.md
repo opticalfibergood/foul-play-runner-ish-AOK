@@ -192,7 +192,69 @@ reason, it falls back to whatever `poke-engine` the venv has installed
 by default -- the same behavior as before this fix, not a new failure
 mode.
 
-## Sprites and icons
+## Any format, no restart (the multi-format coordinator)
+
+The variant-selection fix above still left one thing bolted to
+`start-showdown`'s command line: `--format` picks one exact format
+string, `foul-play`'s own `accept_challenge()` only ever accepts a
+challenge that matches it exactly (`fp/websocket_client.py`:
+`split_msg[5] == battle_format`), and `apply_mods()`
+(`fp/data/mods/apply_mods.py`) mutates the process's in-memory
+pokedex/movedex *downward* from gen9 defaults exactly once, with no way
+back up -- so a single running `foul-play` process really can only ever
+play one format for its entire life. Wanting to play a different format
+meant restarting the whole `start-showdown` -- server included -- and
+sitting through pokemon-showdown's own slow startup work all over again
+(see "What 'fully offline' actually required" above for why that's not
+quick on real iSH-AOK hardware).
+
+Confirmed directly (a second connection can't just also log in as
+`bot` and wait its turn -- tried it against a real local server with
+`noguestsecurity` on: the second `/trn bot` gets a flat `nametaken`,
+regardless), so running one already-logged-in `foul-play` process per
+generation side by side, all answering to the same name, isn't an
+option either.
+
+`start-showdown` (when `--bot-mode` is left at its default
+`accept_challenge` *and* `--format` is omitted) now instead starts
+`multiformat/coordinator.py`, not `foul-play` directly. It logs in to
+Pokemon Showdown exactly **once**, as `bot`, and holds that one
+connection open for as long as `start-showdown` runs. For each
+challenge, whatever format it names:
+
+1. Works out the generation (and so which `poke-engine-variants/`
+   directory it needs) and whether the tier needs a real team, using
+   the same rules described above and the same `requires_team` flags
+   `fp/modes/*.py` already define.
+2. If a team's needed but none exists for that exact format under
+   `fp/teams/teams/`, or the generation has no poke-engine variant
+   built, sends `/reject` and a short explanatory whisper, then keeps
+   waiting -- the same failure `--format <that format>` would already
+   hit today, just discovered per-challenge instead of at startup, and
+   with the challenger actually told, rather than a warning landing on
+   a console they were never watching.
+3. Otherwise sends `/utm` and `/accept` itself, then hands the battle
+   to a `multiformat/worker.py` subprocess -- spawned with exactly the
+   PYTHONPATH trick above pointed at the right variant, and reused
+   as-is for the next battle if it's the same generation, replaced if
+   not. The worker never opens its own websocket at all: it plays the
+   battle via `fp.run_battle.pokemon_battle()` -- foul-play's own,
+   completely unmodified -- against a small stand-in for
+   `PSWebsocketClient` that reads/writes JSON lines on `stdin`/`stdout`
+   instead of a real socket. The coordinator pumps raw protocol lines
+   between its one real connection and whichever worker is currently
+   playing, so from `pokemon_battle()`'s point of view it's talking to
+   Showdown exactly like it always has.
+4. Once that worker reports the battle over, goes back to waiting for
+   the next challenge -- on the *same* connection. No reconnect, no
+   re-login, regardless of how many different formats get challenged
+   in a row.
+
+Pass `--format` explicitly to opt back into the old, single-format
+behavior (useful for e.g. deliberately testing one exact variant); see
+`start-showdown --help`. `--battles`/`--run-count` has no multi-format
+equivalent and is ignored when `--format` is omitted -- there's no
+"play N battles then log off" concept here, it just runs until Ctrl-C.
 
 `scripts/mirror-sprites.js` mirrors, from the real CDN, at build time:
 

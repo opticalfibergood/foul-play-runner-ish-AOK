@@ -22,7 +22,9 @@ set -eu
 PORT="${SHOWDOWN_PORT}"
 BOT_MODE="accept_challenge"
 FORMAT="gen9randombattle"
+FORMAT_EXPLICIT=0
 START_BOT=1
+BATTLES_EXPLICIT=0
 # foul-play's own run_foul_play() (fp/main.py) plays exactly
 # --run-count battles on one persistent connection, then closes the
 # websocket and returns -- and --run-count defaults to 1 (fp/config.py)
@@ -33,28 +35,52 @@ START_BOT=1
 # foul-play to keep going. Default this high enough that it's
 # effectively "stay online and keep accepting challenges" for a
 # locally-hosted bot; override with --battles for a bounded run.
+# (Ignored entirely in multi-format mode -- see MULTIFORMAT below --
+# since the coordinator has no equivalent of --run-count; it just runs
+# until Ctrl-C, same as a very large --battles would mean here anyway.)
 BATTLES=1000000
 
 while [ \$# -gt 0 ]; do
 	case "\$1" in
 		--port) PORT="\$2"; shift 2 ;;
 		--bot-mode) BOT_MODE="\$2"; shift 2 ;;
-		--format) FORMAT="\$2"; shift 2 ;;
-		--battles) BATTLES="\$2"; shift 2 ;;
+		--format) FORMAT="\$2"; FORMAT_EXPLICIT=1; shift 2 ;;
+		--battles) BATTLES="\$2"; BATTLES_EXPLICIT=1; shift 2 ;;
 		--no-bot) START_BOT=0; shift ;;
 		--help)
 			echo "usage: start-showdown [--port N] [--bot-mode MODE] [--format FORMAT] [--battles N] [--no-bot]"
 			echo "  --port N        showdown server port (default: ${SHOWDOWN_PORT})"
 			echo "  --bot-mode MODE foul-play --bot-mode (default: accept_challenge)"
-			echo "  --format FORMAT foul-play --pokemon-format (default: gen9randombattle)"
+			echo "  --format FORMAT foul-play --pokemon-format. If given, the bot only"
+			echo "                  ever accepts that exact format, same as before (default"
+			echo "                  when given: gen9randombattle). If NOT given (the"
+			echo "                  default) and --bot-mode is accept_challenge, the bot"
+			echo "                  instead accepts a challenge in ANY format it has a"
+			echo "                  poke-engine variant (and, for non-random tiers, a team)"
+			echo "                  for -- see the README's \"Any format, no restart\" section."
 			echo "  --battles N     foul-play --run-count -- battles to play before logging"
-			echo "                  off for good, not just after the first one (default: \$BATTLES)"
+			echo "                  off for good, not just after the first one (default: \$BATTLES)."
+			echo "                  Ignored when --format is omitted (see above)."
 			echo "  --no-bot        just run the server, don't start foul-play"
 			exit 0
 			;;
 		*) echo "unknown argument: \$1" >&2; exit 1 ;;
 	esac
 done
+
+# See --format's --help text above: omitting --format on an
+# accept_challenge run is what opts into multi-format mode, where the
+# bot accepts whatever format it's challenged with instead of one fixed
+# at startup. challenge_user/search_ladder both inherently target one
+# specific format by design (who/what you're challenging or laddering
+# as), so multi-format mode only ever applies to accept_challenge.
+MULTIFORMAT=0
+if [ "\$BOT_MODE" = "accept_challenge" ] && [ "\$FORMAT_EXPLICIT" -eq 0 ]; then
+	MULTIFORMAT=1
+	if [ "\$BATTLES_EXPLICIT" -eq 1 ]; then
+		echo "note: --battles has no effect here -- multi-format mode (no --format given) has no equivalent of --run-count and just runs until Ctrl-C. Pass --format to use --battles." >&2
+	fi
+fi
 
 SERVER_PID=""
 BOT_PID=""
@@ -109,17 +135,27 @@ echo "Server starting in the background: http://localhost:\$PORT"
 CONNECT_CHECK_DELAY=15
 
 launch_bot() {
-	FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
-		--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
-		--ps-username bot \\
-		--bot-mode "\$BOT_MODE" \\
-		--pokemon-format "\$FORMAT" \\
-		--run-count "\$BATTLES" &
+	if [ "\$MULTIFORMAT" -eq 1 ]; then
+		FOUL_PLAY_NOGUEST_LOGIN=1 /opt/foul-play/venv/bin/python3 /opt/foul-play/multiformat/coordinator.py \\
+			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
+			--ps-username bot &
+	else
+		FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
+			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
+			--ps-username bot \\
+			--bot-mode "\$BOT_MODE" \\
+			--pokemon-format "\$FORMAT" \\
+			--run-count "\$BATTLES" &
+	fi
 	BOT_PID=\$!
 }
 
 if [ "\$START_BOT" -eq 1 ]; then
-	echo "Waiting for foul-play to connect (--bot-mode \$BOT_MODE, --pokemon-format \$FORMAT)..."
+	if [ "\$MULTIFORMAT" -eq 1 ]; then
+		echo "Waiting for foul-play to connect (--bot-mode \$BOT_MODE, any format)..."
+	else
+		echo "Waiting for foul-play to connect (--bot-mode \$BOT_MODE, --pokemon-format \$FORMAT)..."
+	fi
 	# Earlier versions of this script polled the server with wget before
 	# ever starting the bot. That was checking the wrong thing: on real
 	# iSH-AOK hardware a plain HTTP GET can behave very differently from
@@ -171,7 +207,13 @@ fi
 
 echo ""
 echo "Open the Browser tool in ish-AOK and go to: http://localhost:\$PORT"
-echo "You'll be auto-named 'human'. Challenge 'bot' to a \$FORMAT battle."
+if [ "\$MULTIFORMAT" -eq 1 ]; then
+	echo "You'll be auto-named 'human'. Pick any format and challenge 'bot' --"
+	echo "it'll accept whatever format you challenge it with (as long as it has"
+	echo "a poke-engine variant, and a team if the format needs one)."
+else
+	echo "You'll be auto-named 'human'. Challenge 'bot' to a \$FORMAT battle."
+fi
 echo "Ctrl-C here stops everything."
 
 if [ "\$START_BOT" -eq 1 ]; then

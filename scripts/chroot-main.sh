@@ -48,6 +48,11 @@
 # first one fails, so a still-running sibling (30 rewrites server/static
 # partway through) is never left unsupervised while this script exits and
 # build-rootfs.sh tears the rootfs down around it.
+#
+# 35 runs foreground, after all four of the above are confirmed *finished*
+# (not just started): it installs the multi-format coordinator/worker
+# (see multiformat/ at the repo root), which needs 10's venv and
+# poke-engine-variants/ fully populated, not mid-build.
 set -eu
 
 STEP_DIR="/build-input/scripts/chroot"
@@ -142,6 +147,11 @@ if [ -n "$FAILED_NAME" ]; then
 	echo "############################################################" >&2
 	exit "$FAILED_RC"
 fi
+
+# Needs 10-foulplay.sh's venv + poke-engine-variants fully finished (not
+# just started) -- foreground, after the wait_bg calls above have already
+# confirmed that, rather than a fifth concurrent job racing it.
+run_fg 35-multiformat.sh
 
 run_fg 40-launchers-and-cleanup.sh
 

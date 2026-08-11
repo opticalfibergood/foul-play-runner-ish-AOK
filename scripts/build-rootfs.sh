@@ -181,6 +181,7 @@ log "Building inside the chroot (this is the slow part)"
 mkdir -p "$ROOTFS/build-input"
 cp -r "$HOST_SCRIPT_DIR" "$ROOTFS/build-input/scripts"
 cp -r "$ROOT_DIR/patches" "$ROOTFS/build-input/patches"
+cp -r "$ROOT_DIR/multiformat" "$ROOTFS/build-input/multiformat"
 
 # Seed from a previous run's cache, if actions/cache (or a local rerun)
 # restored one into CI_CACHE_DIR -- a cold run just finds nothing here and
@@ -208,6 +209,7 @@ chroot "$ROOTFS" /usr/bin/env -i \
     MIRROR_CONCURRENCY="$MIRROR_CONCURRENCY" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     PATCH_DIR=/build-input/patches \
+    MULTIFORMAT_DIR=/build-input/multiformat \
     SCRIPT_DIR=/build-input/scripts \
     /bin/sh /build-input/scripts/chroot-main.sh
 
