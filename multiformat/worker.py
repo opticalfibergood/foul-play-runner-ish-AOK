@@ -52,7 +52,7 @@ import traceback
 
 sys.path.insert(0, "/opt/foul-play")
 
-from fp.config import FoulPlayConfig, SaveReplay  # noqa: E402
+from fp.config import BotModes, FoulPlayConfig, SaveReplay  # noqa: E402
 from fp.data.mods.apply_mods import apply_mods  # noqa: E402
 from fp.format_spec import FormatSpec  # noqa: E402
 from fp.run_battle import pokemon_battle  # noqa: E402
@@ -110,8 +110,43 @@ async def _read_envelope(reader):
 
 
 def _configure_for_battle(envelope):
+    """
+    fp/main.py's real run_foul_play() populates every one of these via
+    FoulPlayConfig.configure()'s argparse defaults before anything else
+    runs; this worker skips that entirely (it's not a CLI program, it
+    gets its handful of real inputs from the coordinator's start_battle
+    envelope instead) -- which means _FoulPlayConfig's fields, which are
+    bare type annotations with no defaults (see fp/config.py), stay
+    genuinely unset unless something here sets them explicitly first.
+    Confirmed the hard way: fp/modes/base.py's start_battle_common()
+    reads FoulPlayConfig.log_to_file on every single battle (to decide
+    whether to roll the per-battle debug log file over), which nothing
+    in pokemon_battle()'s own direct call chain (what got audited
+    originally) makes obvious -- it only turned up as a live
+    AttributeError crash. Rather than patch that one field and risk
+    the exact same failure the next time some other rarely-hit branch
+    reads a field nobody traced, every field _FoulPlayConfig declares
+    is set here, confirmed exhaustively via:
+        grep -rn "FoulPlayConfig[.]" fp/ run.py | grep -oE "FoulPlayConfig[.][a-z_]+" | sort -u
+    Most of them (avatar/bot_mode/password/room_name/run_count/
+    team_list/user_id/user_to_challenge/websocket_uri/
+    stdout_log_handler/file_log_handler/log_level) are read-if-set-only
+    by fp/main.py's own connect/login/main-loop and by init_logging()
+    (fp/config.py) -- code this worker never runs, since the coordinator
+    is the one that actually connects and logs in. They're set to inert
+    placeholders below purely so a future foul-play code path reading
+    one of them mid-battle fails loudly and obviously rather than not
+    at all, not because any currently-known battle-time code needs a
+    *specific* value from them.
+    """
+    FoulPlayConfig.websocket_uri = ""
     FoulPlayConfig.username = envelope["username"]
+    FoulPlayConfig.password = None
+    FoulPlayConfig.user_id = envelope["username"]
+    FoulPlayConfig.avatar = None
+    FoulPlayConfig.bot_mode = BotModes.accept_challenge
     FoulPlayConfig.pokemon_format = envelope["format"]
+    FoulPlayConfig.smogon_stats = envelope.get("smogon_stats")
     FoulPlayConfig.search_time_ms = envelope.get("search_time_ms", 100)
     FoulPlayConfig.parallelism = envelope.get("search_parallelism", 1)
     FoulPlayConfig.team_preview_search_time_ms = (
@@ -123,8 +158,24 @@ def _configure_for_battle(envelope):
         or FoulPlayConfig.parallelism
     )
     FoulPlayConfig.search_threads = envelope.get("search_threads", 1)
-    FoulPlayConfig.smogon_stats = envelope.get("smogon_stats")
+    FoulPlayConfig.run_count = 1
+    FoulPlayConfig.team_name = envelope["format"]
+    FoulPlayConfig.team_list = None
+    FoulPlayConfig.user_to_challenge = None
     FoulPlayConfig.save_replay = SaveReplay[envelope.get("save_replay", "never")]
+    FoulPlayConfig.room_name = None
+    FoulPlayConfig.log_level = "INFO"
+    # The one that actually crashed in practice (see the docstring
+    # above): False is correct, not just a placeholder -- this worker
+    # never calls init_logging() (its own logging.basicConfig() call
+    # below routes worker logs to stderr instead, so they don't collide
+    # with the stdin/stdout JSON protocol), so file_log_handler is never
+    # actually set up -- log_to_file has to stay False or
+    # start_battle_common's do_rollover() call would hit a *second*,
+    # different AttributeError on file_log_handler right after this one.
+    FoulPlayConfig.log_to_file = False
+    FoulPlayConfig.stdout_log_handler = None
+    FoulPlayConfig.file_log_handler = None
 
 
 async def main():
