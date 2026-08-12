@@ -135,12 +135,21 @@ echo "Server starting in the background: http://localhost:\$PORT"
 CONNECT_CHECK_DELAY=15
 
 launch_bot() {
+	# FOUL_PLAY_CACHE_ONLY=1 (see patches/foulplay-cache-only-datasets.patch):
+	# there is no internet on this device at all, so if fp/data/sets ever
+	# needs a usage-stats/team-dataset file that scripts/chroot/
+	# 36-warm-datasets.sh didn't pre-warm into this image, it fails with a
+	# clear error naming the missing format instead of hanging (or failing
+	# opaquely) trying to reach a network that isn't there. Same opt-in,
+	# per-process pattern as FOUL_PLAY_NOGUEST_LOGIN alongside it -- only
+	# this launcher sets either one; foul-play run directly (e.g. against
+	# the real ladder) is unaffected by both.
 	if [ "\$MULTIFORMAT" -eq 1 ]; then
-		FOUL_PLAY_NOGUEST_LOGIN=1 /opt/foul-play/venv/bin/python3 /opt/foul-play/multiformat/coordinator.py \\
+		FOUL_PLAY_NOGUEST_LOGIN=1 FOUL_PLAY_CACHE_ONLY=1 /opt/foul-play/venv/bin/python3 /opt/foul-play/multiformat/coordinator.py \\
 			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
 			--ps-username bot &
 	else
-		FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
+		FOUL_PLAY_NOGUEST_LOGIN=1 FOUL_PLAY_CACHE_ONLY=1 foul-play \\
 			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
 			--ps-username bot \\
 			--bot-mode "\$BOT_MODE" \\

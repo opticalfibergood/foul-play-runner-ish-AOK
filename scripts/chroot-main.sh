@@ -53,6 +53,13 @@
 # (not just started): it installs the multi-format coordinator/worker
 # (see multiformat/ at the repo root), which needs 10's venv and
 # poke-engine-variants/ fully populated, not mid-build.
+#
+# 36 also runs foreground, right after 35: pre-warms the usage-stats/
+# team-dataset caches (see multiformat/warm_datasets.py) for WARM_FORMATS.
+# Only actually needs 10's venv (not 35's output), but runs here anyway --
+# last foul-play-side data step before 40 tears the build toolchain down,
+# and this needs real internet access, same as 35 doesn't but easily
+# could have.
 set -eu
 
 STEP_DIR="/build-input/scripts/chroot"
@@ -152,6 +159,8 @@ fi
 # just started) -- foreground, after the wait_bg calls above have already
 # confirmed that, rather than a fifth concurrent job racing it.
 run_fg 35-multiformat.sh
+
+run_fg 36-warm-datasets.sh
 
 run_fg 40-launchers-and-cleanup.sh
 

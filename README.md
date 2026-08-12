@@ -365,9 +365,82 @@ time -- extend `scripts/mirror-sprites.js`'s `STATIC_SPECIES_SPRITE_DIRS`/
   pattern as the other data scripts, so it degrades gracefully offline
   (autocomplete just won't populate) rather than breaking anything.
 
+## Pre-warmed usage-stats/team-dataset caches
+
+foul-play doesn't just need a websocket connection to battle -- for any
+non-random-battle format it also needs to know what opponents are likely
+to be running, which it gets from Smogon's published usage/"chaos" stats
+(`smogon.com/stats/...`) and from curated team sets
+(`data.foulplay.cc`/`play.pokemonshowdown.com/data/sets`); random battles
+pull the random-battle set data from `pkmn.github.io/randbats` instead.
+Confirmed directly (`fp/data/sets/{base,smogon}.py`): every one of these
+already checks a local on-disk cache file first and only falls back to a
+live HTTP fetch on a cache miss -- but on a fresh install that cache
+starts out empty, and none of `smogon.com`/`data.foulplay.cc`/
+`pkmn.github.io` are reachable from an iSH-AOK device with no internet
+access at all.
+
+`scripts/chroot/36-warm-datasets.sh` closes that gap by running the exact
+same fetch-and-cache calls foul-play itself would make -- once, at build
+time, inside CI where there's real internet and a failure is safe to be
+loud about -- for a list of formats controlled by the `WARM_FORMATS`
+build input/env var:
+
+- **`WARM_FORMATS=auto`** (the default): every format this build's own
+  bundled Showdown server can directly be challenged into that
+  foul-play's engine can actually play -- singles (foul-play has no
+  doubles-battle handling at all; confirmed directly, there's nothing
+  resembling multi-slot/`gameType` handling anywhere in `fp/modes`,
+  `fp/battle`, or `fp/search`), laddered, challengeable, and gen1-9. This
+  list isn't hardcoded anywhere in this repo -- `multiformat/
+  list_compatible_formats.py` derives it fresh, every build, straight out
+  of *this build's own* `pokemon-showdown/config/formats.ts` (whatever
+  `SHOWDOWN_REF` actually built), so it can never silently drift out of
+  sync with a hardcoded list here. It's a big sweep (~260 formats as of
+  writing) and deliberately best-effort: plenty of those formats (draft
+  leagues, `customgame` sandboxes, one-off community OM rotations) were
+  never going to have published usage-stats/team-data in the first
+  place, so individual failures there are logged and skipped rather than
+  failing the whole build (`WARM_STRICT=0` in this mode) -- the full
+  pass/fail breakdown is always in the release's `BUILD_INFO.txt`.
+- **A hand-picked list instead** (e.g. `WARM_FORMATS="gen9ou
+  gen9randombattle"`): much faster, and since a list you typed out is
+  presumably meant to be exhaustive, this defaults to `WARM_STRICT=1` --
+  any failure fails the whole build loudly, same "fail loudly, not
+  silently" stance as the rest of this repo, rather than silently
+  shipping an image where that one format just hangs or errors the first
+  time someone tries to battle in it, on a device with no internet to do
+  anything about it in the moment.
+
+None of these caches expire on their own once warmed. Confirmed directly:
+even Smogon's chaos-stats fetch, whose *remote* URL is month-specific
+(`.../stats/2026-07/chaos/gen9ou-0.json`), saves to a cache filename
+that isn't (`ntpath.basename()` of that URL drops the date path segment
+entirely, so it's always just `gen9ou-0.json`) -- a file warmed today is
+still a cache hit next year, until someone deletes it by hand.
+
+The `FOUL_PLAY_CACHE_ONLY=1` patch (see "How patches work" below) is
+what turns that pre-warmed cache into an actual guarantee at battle time
+rather than just a head start: `start-showdown` sets it on every launch,
+so a cache miss on-device -- a format that genuinely wasn't warmed, or
+never had data published for it -- raises a clear, immediate error
+naming the missing file instead of a `requests.get()` silently hanging
+(or failing opaquely) against a network that was never going to answer.
+A cache *hit* is completely unaffected either way; foul-play run directly
+against the real ladder never sets this and behaves exactly as upstream.
+
+`scripts/verify-rootfs.sh` proves this actually works, not just that some
+files exist on disk: it re-reads the warmed format list back out of the
+built image's own `BUILD_INFO.txt` and re-runs the real
+`SmogonSets`/`TeamDatasets`/`RandomBattleTeamDatasets` initialization for
+every one of them with `FOUL_PLAY_CACHE_ONLY=1` set and no network
+available beyond loopback -- the same code path a real on-device battle
+takes, proving every pre-warmed format is actually found in cache rather
+than just asserting it should be.
+
 ## How patches work
 
-Nothing here overwrites an upstream file wholesale. Four real,
+Nothing here overwrites an upstream file wholesale. Six real,
 `git apply`-compatible unified diffs live in `patches/`:
 
 - `showdown-server-config.patch` -- the four config changes above, plus
@@ -376,6 +449,10 @@ Nothing here overwrites an upstream file wholesale. Four real,
 - `showdown-client-testclient.patch` -- the `Config.routes`/
   `defaultserver`/`Net.defaultRoute` fixes and the two hardcoded
   `pokedex-mini(.bw).js` URLs, applied on top of `testclient-new.html`
+- `showdown-client-css-fixes.patch` -- rewrites the two remaining
+  absolute `https://play.pokemonshowdown.com/...` `url(...)` references
+  in `style/client2.css` and `style/sim-types.css` to root-relative
+  paths, applied on top of the client build
 - `foulplay-noguest-login.patch` -- makes foul-play's login skip the
   login-server HTTP round trip when `FOUL_PLAY_NOGUEST_LOGIN=1` is set
   (only `start-showdown` sets it; foul-play's normal behavior against the
@@ -395,6 +472,15 @@ Nothing here overwrites an upstream file wholesale. Four real,
   supervising, so the library-level heartbeat isn't needed to detect a
   dead peer -- a closed socket or dead process is already caught
   elsewhere. Online/ladder logins are unaffected.
+- `foulplay-cache-only-datasets.patch` -- see "Pre-warmed usage-stats/
+  team-dataset caches" above. Adds an opt-in `FOUL_PLAY_CACHE_ONLY=1`
+  guard to `fp/data/sets/base.py`'s `get_sets_file()` and
+  `fp/data/sets/smogon.py`'s `_get_smogon_stats_json()`: on a cache miss,
+  raise immediately with a clear message instead of attempting a
+  `requests.get()` that can't succeed with no internet on-device. A cache
+  *hit* is byte-for-byte unaffected; only `start-showdown` sets the env
+  var, so foul-play run directly (e.g. against the real ladder) never
+  sees any behavior change.
 
 Each is applied with `git apply --check` first; if it doesn't apply
 cleanly (upstream changed the file in a way that no longer matches), the
@@ -408,11 +494,21 @@ not just "the file still contains some expected string":
   embedded fallback-config script, syntax-checks it standalone, then
   actually executes it in a minimal browser-shim `vm` context and asserts
   `Config.routes.client`, `Config.defaultserver.*`, etc. come out right
+- the CSS patch: `scripts/chroot/30-showdown-client.sh` greps the patched
+  stylesheets afterward and fails the build if any absolute
+  `play.pokemonshowdown.com` CDN `url(...)` survived it
 - the foul-play patches: `python3 -m py_compile` + an `ast`-based check
   that `login` and `create` are still `async def` after both patches are
-  applied (`scripts/chroot/10-foulplay.sh`)
+  applied (`scripts/chroot/10-foulplay.sh`) -- the cache-only patch is
+  syntax-checked the same way, right alongside them
+- the cache-only patch, specifically: `scripts/verify-rootfs.sh`
+  re-invokes the real `SmogonSets`/`TeamDatasets`/`RandomBattleTeamDatasets`
+  initialization for every pre-warmed format with
+  `FOUL_PLAY_CACHE_ONLY=1` set and no network available -- proving the
+  patched cache-miss guard and the pre-warmed cache actually agree with
+  each other, not just that each exists independently
 
-All four patches were built and test-applied against real, freshly
+All six patches were built and test-applied against real, freshly
 cloned checkouts before being committed here -- not hand-written and
 hoped-for.
 
@@ -486,7 +582,7 @@ either later.
 - **Automatic:** every Monday.
 - **Manual:** Actions tab → run workflow. Inputs: `alpine_version`,
   `poke_engine_gen`, `foul_play_ref`, `showdown_ref`, `client_ref`,
-  `runner`.
+  `warm_formats`, `runner`.
 
 Each run **replaces** the assets on the `rootfs-latest` release, so the
 download link never changes.
@@ -502,9 +598,12 @@ sudo ./scripts/verify-rootfs.sh out/foul-play-showdown-offline-aarch64-latest.ta
 ```
 
 `verify-rootfs.sh` checks foul-play imports correctly, actually starts the
-bundled server inside the chroot, waits for it to come up, and confirms
-the served page is the offline-patched client (not the original,
-internet-pointing one).
+bundled server inside the chroot, waits for it to come up, confirms the
+served page is the offline-patched client (not the original,
+internet-pointing one), and re-runs the real dataset-loading code for
+every pre-warmed format under `FOUL_PLAY_CACHE_ONLY=1` with no network
+available, proving the pre-warmed caches are actually found rather than
+just present on disk.
 
 ## License
 

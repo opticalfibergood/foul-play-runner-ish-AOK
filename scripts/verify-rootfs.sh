@@ -89,6 +89,50 @@ check_variant_selection gen9randombattle terastallization
 check_variant_selection gen9championsrandombattle champions
 check_variant_selection gen9championsou champions
 
+echo "==> pre-warmed dataset caches: exact formats actually load under FOUL_PLAY_CACHE_ONLY=1"
+# Reads the format list back out of BUILD_INFO.txt (written by
+# scripts/chroot/36-warm-datasets.sh) rather than hardcoding it here, so
+# this check always matches whatever WARM_FORMATS this particular image
+# was actually built with. Runs the exact same fp.data.sets calls
+# multiformat/warm_datasets.py made at build time, but with
+# FOUL_PLAY_CACHE_ONLY=1 set (see patches/foulplay-cache-only-datasets.
+# patch) and no network available inside this chroot beyond loopback --
+# so this doesn't just check that some file exists on disk, it proves the
+# same code path a real on-device battle would take actually finds every
+# pre-warmed format in cache, with zero network access, exactly as
+# start-showdown itself will run it.
+WARM_FORMATS_LINE="$(chroot "$TMP" grep '^dataset caches pre-warmed for' /BUILD_INFO.txt || true)"
+if [ -z "$WARM_FORMATS_LINE" ]; then
+    echo "error: BUILD_INFO.txt has no 'dataset caches pre-warmed for' line -- did 36-warm-datasets.sh run?" >&2
+    exit 1
+fi
+WARM_FORMATS="${WARM_FORMATS_LINE#*: }"
+echo "  formats to verify: $WARM_FORMATS"
+
+chroot "$TMP" /usr/bin/env -i FOUL_PLAY_CACHE_ONLY=1 \
+    /opt/foul-play/venv/bin/python3 -c "
+import sys
+sys.path.insert(0, '/opt/foul-play')
+from fp.constants import BattleType
+from fp.data.sets import RandomBattleTeamDatasets, SmogonSets, TeamDatasets
+from fp.data.sets.team_datasets import get_pkmn_sets_file
+from fp.format_spec import FormatSpec
+
+formats = '$WARM_FORMATS'.split()
+assert formats, 'no formats parsed out of BUILD_INFO.txt'
+for fmt in formats:
+    spec = FormatSpec.from_format_string(fmt)
+    if spec.battle_type == BattleType.RANDOM_BATTLE:
+        RandomBattleTeamDatasets().initialize(spec)
+    elif spec.battle_type == BattleType.BATTLE_FACTORY:
+        get_pkmn_sets_file(spec.full_name, 'factory-sets.json')
+    else:
+        SmogonSets().initialize(spec, set())
+        TeamDatasets().initialize(spec, set())
+    print(f'  {fmt}: OK (cache-only, zero network)')
+print('all pre-warmed formats verified under FOUL_PLAY_CACHE_ONLY=1')
+"
+
 echo "==> starting the bundled showdown server briefly"
 chroot "$TMP" /usr/bin/env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
     sh -c 'cd /opt/pokemon-showdown && node pokemon-showdown start --skip-build 8000' &

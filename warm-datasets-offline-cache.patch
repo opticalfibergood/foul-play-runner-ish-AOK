@@ -1,0 +1,864 @@
+diff --git a/.github/workflows/build-rootfs.yml b/.github/workflows/build-rootfs.yml
+index 0733a26..59d1572 100644
+--- a/.github/workflows/build-rootfs.yml
++++ b/.github/workflows/build-rootfs.yml
+@@ -61,6 +61,24 @@ on:
+         description: "smogon/pokemon-showdown-client git ref to build"
+         type: string
+         default: master
++      warm_formats:
++        description: >
++          Space-separated list of formats to pre-fetch usage-stats/
++          team-dataset caches for (see scripts/chroot/36-warm-datasets.sh
++          and multiformat/warm_datasets.py), or "auto" for every format
++          this build's own bundled Showdown server can directly be
++          challenged into that foul-play's engine can actually play --
++          singles, laddered, challengeable, gen1-9 (see
++          multiformat/list_compatible_formats.py). "auto" is a big,
++          best-effort sweep (~260 formats as of writing): individual
++          formats with nothing published to fetch (draft leagues,
++          customgame sandboxes, one-off community rotations) are skipped,
++          not build-failing, and the full pass/fail breakdown is always in
++          the release's BUILD_INFO.txt either way. A hand-picked list here
++          instead is treated as exhaustive -- any failure in it fails the
++          build (WARM_STRICT; see 36-warm-datasets.sh).
++        type: string
++        default: auto
+       runner:
+         description: >
+           Runner label. ubuntu-24.04-arm/ubuntu-22.04-arm are GitHub's own
+@@ -110,6 +128,7 @@ jobs:
+       FOUL_PLAY_REF: ${{ github.event.inputs.foul_play_ref || 'main' }}
+       SHOWDOWN_REF: ${{ github.event.inputs.showdown_ref || 'master' }}
+       CLIENT_REF: ${{ github.event.inputs.client_ref || 'master' }}
++      WARM_FORMATS: ${{ github.event.inputs.warm_formats || 'auto' }}
+     steps:
+       - uses: actions/checkout@v4
+ 
+diff --git a/README.md b/README.md
+index fc95f2b..8f5094f 100644
+--- a/README.md
++++ b/README.md
+@@ -365,9 +365,82 @@ time -- extend `scripts/mirror-sprites.js`'s `STATIC_SPECIES_SPRITE_DIRS`/
+   pattern as the other data scripts, so it degrades gracefully offline
+   (autocomplete just won't populate) rather than breaking anything.
+ 
++## Pre-warmed usage-stats/team-dataset caches
++
++foul-play doesn't just need a websocket connection to battle -- for any
++non-random-battle format it also needs to know what opponents are likely
++to be running, which it gets from Smogon's published usage/"chaos" stats
++(`smogon.com/stats/...`) and from curated team sets
++(`data.foulplay.cc`/`play.pokemonshowdown.com/data/sets`); random battles
++pull the random-battle set data from `pkmn.github.io/randbats` instead.
++Confirmed directly (`fp/data/sets/{base,smogon}.py`): every one of these
++already checks a local on-disk cache file first and only falls back to a
++live HTTP fetch on a cache miss -- but on a fresh install that cache
++starts out empty, and none of `smogon.com`/`data.foulplay.cc`/
++`pkmn.github.io` are reachable from an iSH-AOK device with no internet
++access at all.
++
++`scripts/chroot/36-warm-datasets.sh` closes that gap by running the exact
++same fetch-and-cache calls foul-play itself would make -- once, at build
++time, inside CI where there's real internet and a failure is safe to be
++loud about -- for a list of formats controlled by the `WARM_FORMATS`
++build input/env var:
++
++- **`WARM_FORMATS=auto`** (the default): every format this build's own
++  bundled Showdown server can directly be challenged into that
++  foul-play's engine can actually play -- singles (foul-play has no
++  doubles-battle handling at all; confirmed directly, there's nothing
++  resembling multi-slot/`gameType` handling anywhere in `fp/modes`,
++  `fp/battle`, or `fp/search`), laddered, challengeable, and gen1-9. This
++  list isn't hardcoded anywhere in this repo -- `multiformat/
++  list_compatible_formats.py` derives it fresh, every build, straight out
++  of *this build's own* `pokemon-showdown/config/formats.ts` (whatever
++  `SHOWDOWN_REF` actually built), so it can never silently drift out of
++  sync with a hardcoded list here. It's a big sweep (~260 formats as of
++  writing) and deliberately best-effort: plenty of those formats (draft
++  leagues, `customgame` sandboxes, one-off community OM rotations) were
++  never going to have published usage-stats/team-data in the first
++  place, so individual failures there are logged and skipped rather than
++  failing the whole build (`WARM_STRICT=0` in this mode) -- the full
++  pass/fail breakdown is always in the release's `BUILD_INFO.txt`.
++- **A hand-picked list instead** (e.g. `WARM_FORMATS="gen9ou
++  gen9randombattle"`): much faster, and since a list you typed out is
++  presumably meant to be exhaustive, this defaults to `WARM_STRICT=1` --
++  any failure fails the whole build loudly, same "fail loudly, not
++  silently" stance as the rest of this repo, rather than silently
++  shipping an image where that one format just hangs or errors the first
++  time someone tries to battle in it, on a device with no internet to do
++  anything about it in the moment.
++
++None of these caches expire on their own once warmed. Confirmed directly:
++even Smogon's chaos-stats fetch, whose *remote* URL is month-specific
++(`.../stats/2026-07/chaos/gen9ou-0.json`), saves to a cache filename
++that isn't (`ntpath.basename()` of that URL drops the date path segment
++entirely, so it's always just `gen9ou-0.json`) -- a file warmed today is
++still a cache hit next year, until someone deletes it by hand.
++
++The `FOUL_PLAY_CACHE_ONLY=1` patch (see "How patches work" below) is
++what turns that pre-warmed cache into an actual guarantee at battle time
++rather than just a head start: `start-showdown` sets it on every launch,
++so a cache miss on-device -- a format that genuinely wasn't warmed, or
++never had data published for it -- raises a clear, immediate error
++naming the missing file instead of a `requests.get()` silently hanging
++(or failing opaquely) against a network that was never going to answer.
++A cache *hit* is completely unaffected either way; foul-play run directly
++against the real ladder never sets this and behaves exactly as upstream.
++
++`scripts/verify-rootfs.sh` proves this actually works, not just that some
++files exist on disk: it re-reads the warmed format list back out of the
++built image's own `BUILD_INFO.txt` and re-runs the real
++`SmogonSets`/`TeamDatasets`/`RandomBattleTeamDatasets` initialization for
++every one of them with `FOUL_PLAY_CACHE_ONLY=1` set and no network
++available beyond loopback -- the same code path a real on-device battle
++takes, proving every pre-warmed format is actually found in cache rather
++than just asserting it should be.
++
+ ## How patches work
+ 
+-Nothing here overwrites an upstream file wholesale. Four real,
++Nothing here overwrites an upstream file wholesale. Six real,
+ `git apply`-compatible unified diffs live in `patches/`:
+ 
+ - `showdown-server-config.patch` -- the four config changes above, plus
+@@ -376,6 +449,10 @@ Nothing here overwrites an upstream file wholesale. Four real,
+ - `showdown-client-testclient.patch` -- the `Config.routes`/
+   `defaultserver`/`Net.defaultRoute` fixes and the two hardcoded
+   `pokedex-mini(.bw).js` URLs, applied on top of `testclient-new.html`
++- `showdown-client-css-fixes.patch` -- rewrites the two remaining
++  absolute `https://play.pokemonshowdown.com/...` `url(...)` references
++  in `style/client2.css` and `style/sim-types.css` to root-relative
++  paths, applied on top of the client build
+ - `foulplay-noguest-login.patch` -- makes foul-play's login skip the
+   login-server HTTP round trip when `FOUL_PLAY_NOGUEST_LOGIN=1` is set
+   (only `start-showdown` sets it; foul-play's normal behavior against the
+@@ -395,6 +472,15 @@ Nothing here overwrites an upstream file wholesale. Four real,
+   supervising, so the library-level heartbeat isn't needed to detect a
+   dead peer -- a closed socket or dead process is already caught
+   elsewhere. Online/ladder logins are unaffected.
++- `foulplay-cache-only-datasets.patch` -- see "Pre-warmed usage-stats/
++  team-dataset caches" above. Adds an opt-in `FOUL_PLAY_CACHE_ONLY=1`
++  guard to `fp/data/sets/base.py`'s `get_sets_file()` and
++  `fp/data/sets/smogon.py`'s `_get_smogon_stats_json()`: on a cache miss,
++  raise immediately with a clear message instead of attempting a
++  `requests.get()` that can't succeed with no internet on-device. A cache
++  *hit* is byte-for-byte unaffected; only `start-showdown` sets the env
++  var, so foul-play run directly (e.g. against the real ladder) never
++  sees any behavior change.
+ 
+ Each is applied with `git apply --check` first; if it doesn't apply
+ cleanly (upstream changed the file in a way that no longer matches), the
+@@ -408,11 +494,21 @@ not just "the file still contains some expected string":
+   embedded fallback-config script, syntax-checks it standalone, then
+   actually executes it in a minimal browser-shim `vm` context and asserts
+   `Config.routes.client`, `Config.defaultserver.*`, etc. come out right
++- the CSS patch: `scripts/chroot/30-showdown-client.sh` greps the patched
++  stylesheets afterward and fails the build if any absolute
++  `play.pokemonshowdown.com` CDN `url(...)` survived it
+ - the foul-play patches: `python3 -m py_compile` + an `ast`-based check
+   that `login` and `create` are still `async def` after both patches are
+-  applied (`scripts/chroot/10-foulplay.sh`)
+-
+-All four patches were built and test-applied against real, freshly
++  applied (`scripts/chroot/10-foulplay.sh`) -- the cache-only patch is
++  syntax-checked the same way, right alongside them
++- the cache-only patch, specifically: `scripts/verify-rootfs.sh`
++  re-invokes the real `SmogonSets`/`TeamDatasets`/`RandomBattleTeamDatasets`
++  initialization for every pre-warmed format with
++  `FOUL_PLAY_CACHE_ONLY=1` set and no network available -- proving the
++  patched cache-miss guard and the pre-warmed cache actually agree with
++  each other, not just that each exists independently
++
++All six patches were built and test-applied against real, freshly
+ cloned checkouts before being committed here -- not hand-written and
+ hoped-for.
+ 
+@@ -486,7 +582,7 @@ either later.
+ - **Automatic:** every Monday.
+ - **Manual:** Actions tab → run workflow. Inputs: `alpine_version`,
+   `poke_engine_gen`, `foul_play_ref`, `showdown_ref`, `client_ref`,
+-  `runner`.
++  `warm_formats`, `runner`.
+ 
+ Each run **replaces** the assets on the `rootfs-latest` release, so the
+ download link never changes.
+@@ -502,9 +598,12 @@ sudo ./scripts/verify-rootfs.sh out/foul-play-showdown-offline-aarch64-latest.ta
+ ```
+ 
+ `verify-rootfs.sh` checks foul-play imports correctly, actually starts the
+-bundled server inside the chroot, waits for it to come up, and confirms
+-the served page is the offline-patched client (not the original,
+-internet-pointing one).
++bundled server inside the chroot, waits for it to come up, confirms the
++served page is the offline-patched client (not the original,
++internet-pointing one), and re-runs the real dataset-loading code for
++every pre-warmed format under `FOUL_PLAY_CACHE_ONLY=1` with no network
++available, proving the pre-warmed caches are actually found rather than
++just present on disk.
+ 
+ ## License
+ 
+diff --git a/multiformat/list_compatible_formats.py b/multiformat/list_compatible_formats.py
+new file mode 100644
+index 0000000..f138e37
+--- /dev/null
++++ b/multiformat/list_compatible_formats.py
+@@ -0,0 +1,196 @@
++#!/usr/bin/env python3
++"""
++foul-play-ish-aok "every directly compatible format" list.
++
++There is no fixed, externally-published list of "every format foul-play
++can play" to just look up -- the actual source of truth is whatever this
++specific build's bundled pokemon-showdown server itself defines in
++config/formats.ts (that file IS the whole set of formats this device's
++server can ever offer a challenge in -- nothing else exists to challenge
++into). So this reads it directly, out of the exact showdown checkout this
++image is shipping, rather than a hardcoded list here that would silently
++drift from whatever SHOWDOWN_REF actually built.
++
++config/formats.ts is TypeScript, not JSON (unquoted keys, trailing
++commas, and -- inside a handful of formats' inline rule functions like
++onValidateTeam -- real TS-only syntax such as `as ID` casts and typed
++`const x: SomeType = ...` locals). Rather than transpile the whole file
++(and inevitably fight more one-off TS syntax someone adds to a rule
++function later), this only ever looks at simple top-level
++`key: 'value',`-shaped lines directly inside each format's own {...}
++object -- exactly the shape name/mod/team/gameType/rated/challengeShow
++actually appear in, and never how they'd appear if matched accidentally
++inside a nested rule function body. Brace/string/comment-aware scanning
++(not a naive per-line split) is what finds those top-level object
++boundaries correctly despite everything nested inside them.
++
++"Directly compatible" here means all three of:
++  - singles (gameType absent, or 'singles' -- excludes every 'doubles',
++    'triples', 'multi', 'freeforall' format outright: foul-play's own
++    battle/search code has no doubles-battle handling at all, confirmed
++    directly -- grep fp/ turns up nothing resembling gameType or
++    multi-slot handling anywhere in fp/modes, fp/battle, or fp/search)
++  - laddered (rated is not explicitly false -- excludes the handful of
++    hidden/test variants like "[Gen 9] Unrated Random Battle")
++  - challengeable (challengeShow is not explicitly false -- excludes
++    formats nobody could ever actually challenge the bot to in the first
++    place, since multiformat/coordinator.py only ever responds to
++    incoming /challenge PMs)
++  - has a recognized gen1-gen9 in its id (matches fp/format_spec.py's own
++    `gen([1-9]0?)` regex) -- poke-engine only has gen1-gen9 (+ Champions)
++    variants built (see scripts/chroot/10-foulplay.sh, 20-poke-engine.sh)
++
++This deliberately does NOT try to further guess which of those formats
++Smogon/foulplay.cc actually publish usage-stats/team-data for (customgame
++sandboxes, draft leagues, and plenty of Other-Metagames rotation formats
++almost certainly don't) -- that's not this script's job to predict, and
++guessing would just reintroduce the same "stale list baked from someone's
++assumptions" problem this whole approach exists to avoid. It's
++warm_datasets.py's job (via WARM_STRICT, see its own docstring) to attempt
++every one of these and report -- not skip, guess, or silently drop
++some -- which ones actually had data to fetch.
++"""
++import re
++import sys
++
++
++def to_ps_id(name: str) -> str:
++    """Mirrors Pokemon Showdown's own toID(): lowercase, strip everything
++    that isn't a-z0-9. E.g. "[Gen 9] Random Battle" -> "gen9randombattle".
++    """
++    return re.sub(r"[^a-z0-9]", "", name.lower())
++
++
++def _skip_string(s: str, i: int, quote: str) -> int:
++    i += 1
++    while i < len(s):
++        if s[i] == "\\":
++            i += 2
++            continue
++        if s[i] == quote:
++            return i + 1
++        i += 1
++    return i
++
++
++def _skip_template(s: str, i: int) -> int:
++    # Naive: doesn't handle ${...} interpolation containing a nested
++    # backtick. None of formats.ts's template literals do that.
++    i += 1
++    while i < len(s):
++        if s[i] == "\\":
++            i += 2
++            continue
++        if s[i] == "`":
++            return i + 1
++        i += 1
++    return i
++
++
++def extract_top_level_entries(text: str) -> list[str]:
++    """Returns the raw text inside each top-level `{...}` item of the
++    `export const Formats: ... = [ ... ]` array, comment/string/template
++    literal aware so nested braces inside inline rule functions never
++    confuse where one format entry ends and the next begins.
++    """
++    marker = "export const Formats: import("
++    if marker not in text:
++        raise ValueError(
++            "couldn't find 'export const Formats: import(...)' in this "
++            "file -- is this really pokemon-showdown's config/formats.ts?"
++        )
++    start = text.index("[", text.index(marker))
++
++    n = len(text)
++    i = start
++    array_depth = 0
++    brace_depth = 0
++    item_start = None
++    items = []
++    while i < n:
++        c = text[i]
++        if c == "/" and i + 1 < n and text[i + 1] == "/":
++            i = text.index("\n", i) + 1
++            continue
++        if c == "/" and i + 1 < n and text[i + 1] == "*":
++            i = text.index("*/", i) + 2
++            continue
++        if c in ("'", '"'):
++            i = _skip_string(text, i, c)
++            continue
++        if c == "`":
++            i = _skip_template(text, i)
++            continue
++        if c == "[":
++            array_depth += 1
++            i += 1
++            continue
++        if c == "]":
++            array_depth -= 1
++            i += 1
++            if array_depth == 0:
++                break
++            continue
++        if c == "{":
++            if brace_depth == 0 and array_depth == 1:
++                item_start = i + 1
++            brace_depth += 1
++            i += 1
++            continue
++        if c == "}":
++            brace_depth -= 1
++            if brace_depth == 0 and array_depth == 1 and item_start is not None:
++                items.append(text[item_start:i])
++                item_start = None
++            i += 1
++            continue
++        i += 1
++    return items
++
++
++def _field(entry: str, key: str, kind: str = "str"):
++    if kind == "str":
++        m = re.search(r"^\s*" + key + r":\s*['\"]([^'\"]*)['\"]", entry, re.MULTILINE)
++        return m.group(1) if m else None
++    m = re.search(r"^\s*" + key + r":\s*(true|false)", entry, re.MULTILINE)
++    return (m.group(1) == "true") if m else None
++
++
++_GEN_RE = re.compile(r"gen[1-9]")
++
++
++def compatible_format_ids(formats_ts_text: str) -> list[str]:
++    ids = []
++    for entry in extract_top_level_entries(formats_ts_text):
++        name = _field(entry, "name")
++        if name is None:
++            continue  # a `{section: "..."}` header, not a format
++        if _field(entry, "gameType") not in (None, "singles"):
++            continue
++        if _field(entry, "rated", "bool") is False:
++            continue
++        if _field(entry, "challengeShow", "bool") is False:
++            continue
++        format_id = to_ps_id(name)
++        if not _GEN_RE.search(format_id):
++            continue
++        ids.append(format_id)
++    return ids
++
++
++def main(argv: list[str]) -> int:
++    if len(argv) != 1:
++        print("usage: list_compatible_formats.py path/to/config/formats.ts", file=sys.stderr)
++        return 1
++    text = open(argv[0], encoding="utf-8").read()
++    ids = compatible_format_ids(text)
++    if not ids:
++        print("error: parsed formats.ts but found zero compatible formats -- parser is likely broken", file=sys.stderr)
++        return 1
++    print(" ".join(ids))
++    print(f"({len(ids)} directly-compatible formats)", file=sys.stderr)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv[1:]))
+diff --git a/multiformat/warm_datasets.py b/multiformat/warm_datasets.py
+new file mode 100644
+index 0000000..598e617
+--- /dev/null
++++ b/multiformat/warm_datasets.py
+@@ -0,0 +1,140 @@
++#!/usr/bin/env python3
++"""
++foul-play-ish-aok dataset cache warmer.
++
++Runs once, at build time (inside the chroot, with real internet access,
++before 40-launchers-and-cleanup.sh removes the build toolchain) -- plain
++`venv/bin/python3`, no poke-engine variant needed on PYTHONPATH, since
++fp.data.sets is poke_engine-free by construction (confirmed directly:
++grep fp/ for `import poke_engine` -- it only appears in fp/battle/
++inference.py, fp/battle/protocol.py, and fp/search/*.py, none of which
++fp/data/sets/*.py imports; multiformat/coordinator.py's own docstring
++notes this same fact, for its own unrelated reason).
++
++For each format string given on argv, this triggers exactly the same
++SmogonSets/TeamDatasets/RandomBattleTeamDatasets.initialize() calls (or,
++for Battle Factory, the lower-level get_pkmn_sets_file() call the
++tier-specific lookup sits on top of -- see the BATTLE_FACTORY branch
++below) that fp/modes/*.py itself makes on first use of that format. It
++does not reimplement any caching logic -- it only calls the real thing
++early, deliberately, at a time when a failure is safe to fail loudly
++instead of silently mid-battle. Whatever lands in fp/data/*_cache/ here
++is byte-for-byte what a real battle would have fetched and cached itself.
++
++Every cache file this writes is picked up permanently: none of
++fp/data/sets/{base,smogon}.py's on-disk cache filenames are date-keyed
++(confirmed directly -- smogon.py's *remote* URL is month-specific, but
++`ntpath.basename()` of it is not, so the cache file it's saved under
++never changes name across months). A file warmed here today is still a
++cache hit next year, until someone deletes it by hand.
++
++Every format on argv is attempted even if an earlier one fails -- one
++tier having no published chaos stats this month (too little ladder play)
++or a typo'd format string shouldn't block every other format from being
++warmed. Failures are collected and reported at the end. Whether that
++makes the process (and so the CI build) exit non-zero is controlled by
++WARM_STRICT (default "1"): a small, hand-picked WARM_FORMATS list is
++usually meant to be exhaustive -- every failure there is a real problem
++worth failing loudly over, same "fail loudly, not silently" stance as
++everything else in this repo. A large, auto-derived "every compatible
++format" sweep (see list_compatible_formats.py) is inherently best-effort
++-- plenty of those formats (draft leagues, customgame sandboxes, one-off
++community rotations) were never going to have published usage-stats/
++team-data in the first place, and failing the whole build over that
++would just be noise -- so scripts/chroot/36-warm-datasets.sh sets
++WARM_STRICT=0 specifically for that case; every failure is still printed
++and still recorded, just doesn't fail the process.
++
++Fetches run WARM_CONCURRENCY (default 8) at a time -- same
++os.environ-driven-default pattern as scripts/mirror-sprites.js's
++MIRROR_CONCURRENCY, and for the same reason: these are small,
++independent, network-latency-bound requests (a plain synchronous requests
++loop of ~260 formats at even a modest ~1s server response time each would
++take minutes for no reason).
++"""
++import os
++import sys
++from concurrent.futures import ThreadPoolExecutor, as_completed
++
++sys.path.insert(0, "/opt/foul-play")
++
++from fp.constants import BattleType  # noqa: E402
++from fp.data.sets import (  # noqa: E402
++    RandomBattleTeamDatasets,
++    SmogonSets,
++    TeamDatasets,
++)
++from fp.data.sets.team_datasets import get_pkmn_sets_file  # noqa: E402
++from fp.format_spec import FormatSpec  # noqa: E402
++
++
++def warm_one(format_string: str) -> None:
++    format_spec = FormatSpec.from_format_string(format_string)
++
++    if format_spec.battle_type == BattleType.RANDOM_BATTLE:
++        print(f"[{format_string}] fetching randbats sets...")
++        RandomBattleTeamDatasets().initialize(format_spec)
++
++    elif format_spec.battle_type == BattleType.BATTLE_FACTORY:
++        # BattleFactoryTeamDatasets needs a tier name that's only known
++        # once a real battle reaches team preview (see
++        # fp/modes/battle_factory.py's extract_battle_factory_tier_from_msg
++        # -- it's parsed out of a live server message). But every tier for
++        # a format lives in the SAME factory-sets.json, indexed by tier
++        # name only after the file is already loaded (see
++        # fp/data/sets/team_datasets.py's _get_battle_factory_sets_dict).
++        # Fetching that one file covers every tier of this format --
++        # nothing here has to guess a tier name.
++        print(f"[{format_string}] fetching factory-sets.json...")
++        get_pkmn_sets_file(format_spec.full_name, "factory-sets.json")
++
++    else:
++        # STANDARD_BATTLE and BSS both go through StandardBattleMode's own
++        # SmogonSets + TeamDatasets calls (fp/modes/standard_battle.py) --
++        # BSS is StandardBattleMode's own subclass, no separate data path.
++        print(f"[{format_string}] fetching smogon chaos stats...")
++        SmogonSets().initialize(format_spec, set())
++        print(f"[{format_string}] fetching team datasets...")
++        TeamDatasets().initialize(format_spec, set())
++
++
++def main(argv: list[str]) -> int:
++    if not argv:
++        print("usage: warm_datasets.py FORMAT [FORMAT ...]", file=sys.stderr)
++        return 1
++
++    strict = os.environ.get("WARM_STRICT", "1") == "1"
++    concurrency = int(os.environ.get("WARM_CONCURRENCY", "8"))
++
++    failures = []
++    with ThreadPoolExecutor(max_workers=concurrency) as pool:
++        future_to_format = {
++            pool.submit(warm_one, format_string): format_string for format_string in argv
++        }
++        for future in as_completed(future_to_format):
++            format_string = future_to_format[future]
++            try:
++                future.result()
++            except Exception as exc:  # noqa: BLE001 -- report every format, not just the first failure
++                print(f"error: failed to warm '{format_string}': {exc}", file=sys.stderr)
++                failures.append(format_string)
++
++    if failures:
++        # Sort for stable, readable output -- as_completed() finishes in
++        # whatever order the network happens to respond, not argv's order.
++        failures.sort()
++        print(
++            f"\n{len(failures)} of {len(argv)} format(s) failed to warm: "
++            f"{' '.join(failures)}",
++            file=sys.stderr,
++        )
++        if strict:
++            return 1
++        print("WARM_STRICT=0: not failing the build over this -- see the errors above.", file=sys.stderr)
++
++    print(f"\n{len(argv) - len(failures)} of {len(argv)} format(s) warmed successfully.")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv[1:]))
+diff --git a/patches/foulplay-cache-only-datasets.patch b/patches/foulplay-cache-only-datasets.patch
+new file mode 100644
+index 0000000..349190c
+--- /dev/null
++++ b/patches/foulplay-cache-only-datasets.patch
+@@ -0,0 +1,51 @@
++diff --git a/fp/data/sets/base.py b/fp/data/sets/base.py
++index 96c7cb8..154d14f 100644
++--- a/fp/data/sets/base.py
+++++ b/fp/data/sets/base.py
++@@ -35,6 +35,22 @@ def get_sets_file(cache_path: str, remote_url: str) -> dict:
++         logger.info(f"Loaded from cache: {cache_path}")
++         return sets
++ 
+++    if os.environ.get("FOUL_PLAY_CACHE_ONLY") == "1":
+++        # Set by this build's start-showdown launcher (same opt-in pattern
+++        # as FOUL_PLAY_NOGUEST_LOGIN in fp/websocket_client.py): the
+++        # on-device image has no internet access at all, so a cache miss
+++        # here can never actually succeed -- fail immediately and clearly
+++        # instead of a `requests.get()` hanging or failing with an opaque
+++        # connection error partway through a battle. Every other caller
+++        # (foul-play run directly, e.g. against the real ladder) never
+++        # sets this and is completely unaffected.
+++        raise RuntimeError(
+++            f"FOUL_PLAY_CACHE_ONLY=1 and no cached file at {cache_path} "
+++            f"(would otherwise fetch {remote_url}). This format wasn't "
+++            f"pre-warmed into this image -- see WARM_FORMATS in "
+++            f"scripts/chroot/36-warm-datasets.sh."
+++        )
+++
++     r = requests.get(remote_url)
++     if r.status_code == 200:
++         sets = r.json()
++diff --git a/fp/data/sets/smogon.py b/fp/data/sets/smogon.py
++index 7959972..09cb33d 100644
++--- a/fp/data/sets/smogon.py
+++++ b/fp/data/sets/smogon.py
++@@ -62,6 +62,19 @@ class SmogonSets(PokemonSets):
++                 infos = json.load(f)
++             logger.info(f"Loaded from cache: {cache_file}")
++         else:
+++            if os.environ.get("FOUL_PLAY_CACHE_ONLY") == "1":
+++                # See fp/data/sets/base.py's get_sets_file for the full
+++                # rationale -- same opt-in-only guard, duplicated here
+++                # because this class fetches smogon chaos stats through
+++                # its own requests.get() rather than base.py's
+++                # get_sets_file() (it has its own 404-retry-a-month-back
+++                # fallback that get_sets_file doesn't need).
+++                raise RuntimeError(
+++                    f"FOUL_PLAY_CACHE_ONLY=1 and no cached file at {cache_file} "
+++                    f"(would otherwise fetch {smogon_stats_url}). This format "
+++                    f"wasn't pre-warmed into this image -- see WARM_FORMATS in "
+++                    f"scripts/chroot/36-warm-datasets.sh."
+++                )
++             r = requests.get(smogon_stats_url)
++             if r.status_code == 404:
++                 r = requests.get(
+diff --git a/scripts/build-rootfs.sh b/scripts/build-rootfs.sh
+index 3197224..a415446 100755
+--- a/scripts/build-rootfs.sh
++++ b/scripts/build-rootfs.sh
+@@ -68,6 +68,11 @@ MIRROR_CONCURRENCY="${MIRROR_CONCURRENCY:-24}"
+ # (well under a second on a real run; crates.io itself isn't the
+ # bottleneck), it's the ~30s compile this is actually meant to save.
+ CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/root/.cargo-target}"
++# Space-separated list of formats to pre-fetch usage-stats/team-dataset
++# caches for, or the default "auto" -- see scripts/chroot/
++# 36-warm-datasets.sh for exactly what "auto" derives and why, and
++# multiformat/list_compatible_formats.py for how.
++WARM_FORMATS="${WARM_FORMATS:-auto}"
+ 
+ # The workflow_dispatch dropdown's "default" choice (meaning "don't override
+ # anything") arrives here as the literal string "default" -- normalize it,
+@@ -208,6 +213,7 @@ chroot "$ROOTFS" /usr/bin/env -i \
+     SHOWDOWN_PORT="$SHOWDOWN_PORT" \
+     MIRROR_CONCURRENCY="$MIRROR_CONCURRENCY" \
+     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
++    WARM_FORMATS="$WARM_FORMATS" \
+     PATCH_DIR=/build-input/patches \
+     MULTIFORMAT_DIR=/build-input/multiformat \
+     SCRIPT_DIR=/build-input/scripts \
+diff --git a/scripts/chroot-main.sh b/scripts/chroot-main.sh
+index 461149a..0581195 100755
+--- a/scripts/chroot-main.sh
++++ b/scripts/chroot-main.sh
+@@ -53,6 +53,13 @@
+ # (not just started): it installs the multi-format coordinator/worker
+ # (see multiformat/ at the repo root), which needs 10's venv and
+ # poke-engine-variants/ fully populated, not mid-build.
++#
++# 36 also runs foreground, right after 35: pre-warms the usage-stats/
++# team-dataset caches (see multiformat/warm_datasets.py) for WARM_FORMATS.
++# Only actually needs 10's venv (not 35's output), but runs here anyway --
++# last foul-play-side data step before 40 tears the build toolchain down,
++# and this needs real internet access, same as 35 doesn't but easily
++# could have.
+ set -eu
+ 
+ STEP_DIR="/build-input/scripts/chroot"
+@@ -153,6 +160,8 @@ fi
+ # confirmed that, rather than a fifth concurrent job racing it.
+ run_fg 35-multiformat.sh
+ 
++run_fg 36-warm-datasets.sh
++
+ run_fg 40-launchers-and-cleanup.sh
+ 
+ echo ""
+diff --git a/scripts/chroot/10-foulplay.sh b/scripts/chroot/10-foulplay.sh
+index 9aee1c4..b33290b 100644
+--- a/scripts/chroot/10-foulplay.sh
++++ b/scripts/chroot/10-foulplay.sh
+@@ -71,8 +71,32 @@ if ! git apply --check "$PATCH_DIR/foulplay-disable-ping-keepalive.patch" 2>/tmp
+ fi
+ git apply "$PATCH_DIR/foulplay-disable-ping-keepalive.patch"
+ 
+-echo "==> Verifying the patched file (syntax + structure)"
+-python3 -m py_compile fp/websocket_client.py
++echo "==> Applying foulplay-cache-only-datasets.patch"
++# Modifies fp/data/sets/base.py's get_sets_file() and fp/data/sets/
++# smogon.py's _get_smogon_stats_json() so that when FOUL_PLAY_CACHE_ONLY=1
++# is set at runtime (used by start-showdown, same opt-in-per-process
++# pattern as FOUL_PLAY_NOGUEST_LOGIN above -- see
++# scripts/chroot/40-launchers-and-cleanup.sh) a cache miss raises a clear
++# RuntimeError immediately instead of attempting a `requests.get()` that
++# can never succeed on a device with no internet access at all -- no more
++# hanging or an opaque connection error mid-battle. A cache *hit* is
++# completely unaffected (still just reads the file, as before); every
++# other caller (foul-play run directly, e.g. against the real ladder)
++# never sets this env var and is completely unaffected either way.
++# Pairs with scripts/chroot/36-warm-datasets.sh, which pre-populates that
++# same cache at build time for a known list of formats -- see that
++# script and its WARM_FORMATS for what's actually pre-warmed into this
++# image.
++if ! git apply --check "$PATCH_DIR/foulplay-cache-only-datasets.patch" 2>/tmp/patch-check.err; then
++    echo "error: foulplay-cache-only-datasets.patch no longer applies cleanly to foul-play@${FOUL_PLAY_COMMIT}" >&2
++    cat /tmp/patch-check.err >&2
++    echo "foul-play's fp/data/sets/{base,smogon}.py has likely changed upstream; the patch needs updating." >&2
++    exit 1
++fi
++git apply "$PATCH_DIR/foulplay-cache-only-datasets.patch"
++
++echo "==> Verifying the patched files (syntax check)"
++python3 -m py_compile fp/websocket_client.py fp/data/sets/base.py fp/data/sets/smogon.py
+ python3 - <<'PY'
+ import ast
+ tree = ast.parse(open("fp/websocket_client.py").read())
+diff --git a/scripts/chroot/36-warm-datasets.sh b/scripts/chroot/36-warm-datasets.sh
+new file mode 100755
+index 0000000..13d00f4
+--- /dev/null
++++ b/scripts/chroot/36-warm-datasets.sh
+@@ -0,0 +1,78 @@
++#!/bin/sh
++# Step 36: pre-fetch and cache the usage-stats/team-dataset files foul-play
++# would otherwise fetch live, on first use, from smogon.com,
++# data.foulplay.cc, and pkmn.github.io -- for a list of formats chosen at
++# build time (WARM_FORMATS below), while this chroot still has real
++# internet access and a build failure is safe to be loud about.
++#
++# This is separate from "fully offline" as the README's "What 'fully
++# offline' actually required" section defines it (that's about the login
++# server and the server/client's own network assumptions, not this).
++# foul-play's own fp/data/sets/*.py already caches these files
++# permanently once fetched once -- confirmed directly: none of its
++# on-disk cache filenames are date-keyed, not even smogon.py's chaos
++# stats, despite the *remote* URL it downloads from being month-specific
++# (ntpath.basename() of that URL drops the "/2026-07/" path segment
++# entirely, so the cache file saved locally is just "gen9ou-0.json",
++# identical every month). A file fetched once is used forever, until
++# someone deletes it by hand. Running that same fetch-and-cache path
++# here, once per format below, means an on-device run of start-showdown
++# is never the FIRST call for any of them -- it always finds a cache hit
++# and never touches the network, for exactly the formats this step warms.
++#
++# Runs after 35-multiformat.sh (foreground, not one of the four
++# concurrent 10/15/20/30 jobs): needs 10-foulplay.sh's venv, same as 35,
++# and (for WARM_FORMATS=auto below) 20-showdown-server.sh's
++# /opt/pokemon-showdown/config/formats.ts -- it just happens to live in
++# the same numeric neighborhood since it's the last foul-play-side data
++# step before 40 tears the build toolchain down.
++#
++# WARM_FORMATS="auto" (the default) means "every format this image's own
++# bundled Showdown server can directly be challenged into, that
++# foul-play's engine can actually play" -- see
++# multiformat/list_compatible_formats.py for exactly what that means and
++# why it's derived from THIS build's own config/formats.ts rather than a
++# hardcoded list here (which would just silently drift from whatever
++# SHOWDOWN_REF actually built). That's a big, best-effort sweep (~260
++# formats as of writing) -- plenty of them (draft leagues, customgame
++# sandboxes, one-off community rotations) were never going to have
++# published usage-stats/team-data in the first place, so this runs it
++# non-strict (WARM_STRICT=0: every failure still gets printed and still
++# recorded in BUILD_INFO.txt, it just doesn't fail the whole build) unless
++# WARM_STRICT is already set in the environment.
++#
++# Set WARM_FORMATS explicitly (a plain space-separated list, e.g.
++# "gen9ou gen9randombattle") to warm only formats you actually intend to
++# play instead -- much faster, and since a hand-picked list is presumably
++# meant to be exhaustive, this then defaults WARM_STRICT=1: any failure
++# there fails the whole build loudly, same as everywhere else in this
++# repo, rather than silently shipping an image where that format will
++# just hang or error the first time someone tries to battle in it on a
++# device with no internet to do anything about it in the moment.
++set -eu
++
++MULTIFORMAT_DIR="${MULTIFORMAT_DIR:?MULTIFORMAT_DIR must be set by build-rootfs.sh}"
++WARM_FORMATS="${WARM_FORMATS:-auto}"
++
++if [ "$WARM_FORMATS" = "auto" ]; then
++    echo "==> WARM_FORMATS=auto -- deriving every directly-compatible format from this build's own config/formats.ts"
++    FORMATS_TS=/opt/pokemon-showdown/config/formats.ts
++    [ -f "$FORMATS_TS" ] || { echo "error: $FORMATS_TS not found -- did 20-showdown-server.sh run first?" >&2; exit 1; }
++    WARM_FORMATS="$(python3 "$MULTIFORMAT_DIR/list_compatible_formats.py" "$FORMATS_TS")"
++    WARM_STRICT="${WARM_STRICT:-0}"
++else
++    WARM_STRICT="${WARM_STRICT:-1}"
++fi
++export WARM_STRICT
++
++echo "==> Warming usage-stats/team-dataset caches (WARM_STRICT=$WARM_STRICT) for:"
++echo "    $WARM_FORMATS"
++# shellcheck disable=SC2086  # WARM_FORMATS is deliberately word-split here:
++# a space-separated list of format strings, not a single argument.
++/opt/foul-play/venv/bin/python3 "$MULTIFORMAT_DIR/warm_datasets.py" $WARM_FORMATS
++
++cat >> /opt/foul-play/BUILD_INFO.txt <<EOF
++dataset caches pre-warmed for (scripts/chroot/36-warm-datasets.sh, WARM_STRICT=$WARM_STRICT): $WARM_FORMATS
++EOF
++
++echo "==> 36-warm-datasets.sh finished"
+diff --git a/scripts/chroot/40-launchers-and-cleanup.sh b/scripts/chroot/40-launchers-and-cleanup.sh
+index 60abc6a..43d323e 100644
+--- a/scripts/chroot/40-launchers-and-cleanup.sh
++++ b/scripts/chroot/40-launchers-and-cleanup.sh
+@@ -135,12 +135,21 @@ echo "Server starting in the background: http://localhost:\$PORT"
+ CONNECT_CHECK_DELAY=15
+ 
+ launch_bot() {
++	# FOUL_PLAY_CACHE_ONLY=1 (see patches/foulplay-cache-only-datasets.patch):
++	# there is no internet on this device at all, so if fp/data/sets ever
++	# needs a usage-stats/team-dataset file that scripts/chroot/
++	# 36-warm-datasets.sh didn't pre-warm into this image, it fails with a
++	# clear error naming the missing format instead of hanging (or failing
++	# opaquely) trying to reach a network that isn't there. Same opt-in,
++	# per-process pattern as FOUL_PLAY_NOGUEST_LOGIN alongside it -- only
++	# this launcher sets either one; foul-play run directly (e.g. against
++	# the real ladder) is unaffected by both.
+ 	if [ "\$MULTIFORMAT" -eq 1 ]; then
+-		FOUL_PLAY_NOGUEST_LOGIN=1 /opt/foul-play/venv/bin/python3 /opt/foul-play/multiformat/coordinator.py \\
++		FOUL_PLAY_NOGUEST_LOGIN=1 FOUL_PLAY_CACHE_ONLY=1 /opt/foul-play/venv/bin/python3 /opt/foul-play/multiformat/coordinator.py \\
+ 			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
+ 			--ps-username bot &
+ 	else
+-		FOUL_PLAY_NOGUEST_LOGIN=1 foul-play \\
++		FOUL_PLAY_NOGUEST_LOGIN=1 FOUL_PLAY_CACHE_ONLY=1 foul-play \\
+ 			--websocket-uri "ws://localhost:\$PORT/showdown/websocket" \\
+ 			--ps-username bot \\
+ 			--bot-mode "\$BOT_MODE" \\
+diff --git a/scripts/verify-rootfs.sh b/scripts/verify-rootfs.sh
+index a21fe74..addee14 100755
+--- a/scripts/verify-rootfs.sh
++++ b/scripts/verify-rootfs.sh
+@@ -89,6 +89,50 @@ check_variant_selection gen9randombattle terastallization
+ check_variant_selection gen9championsrandombattle champions
+ check_variant_selection gen9championsou champions
+ 
++echo "==> pre-warmed dataset caches: exact formats actually load under FOUL_PLAY_CACHE_ONLY=1"
++# Reads the format list back out of BUILD_INFO.txt (written by
++# scripts/chroot/36-warm-datasets.sh) rather than hardcoding it here, so
++# this check always matches whatever WARM_FORMATS this particular image
++# was actually built with. Runs the exact same fp.data.sets calls
++# multiformat/warm_datasets.py made at build time, but with
++# FOUL_PLAY_CACHE_ONLY=1 set (see patches/foulplay-cache-only-datasets.
++# patch) and no network available inside this chroot beyond loopback --
++# so this doesn't just check that some file exists on disk, it proves the
++# same code path a real on-device battle would take actually finds every
++# pre-warmed format in cache, with zero network access, exactly as
++# start-showdown itself will run it.
++WARM_FORMATS_LINE="$(chroot "$TMP" grep '^dataset caches pre-warmed for' /BUILD_INFO.txt || true)"
++if [ -z "$WARM_FORMATS_LINE" ]; then
++    echo "error: BUILD_INFO.txt has no 'dataset caches pre-warmed for' line -- did 36-warm-datasets.sh run?" >&2
++    exit 1
++fi
++WARM_FORMATS="${WARM_FORMATS_LINE#*: }"
++echo "  formats to verify: $WARM_FORMATS"
++
++chroot "$TMP" /usr/bin/env -i FOUL_PLAY_CACHE_ONLY=1 \
++    /opt/foul-play/venv/bin/python3 -c "
++import sys
++sys.path.insert(0, '/opt/foul-play')
++from fp.constants import BattleType
++from fp.data.sets import RandomBattleTeamDatasets, SmogonSets, TeamDatasets
++from fp.data.sets.team_datasets import get_pkmn_sets_file
++from fp.format_spec import FormatSpec
++
++formats = '$WARM_FORMATS'.split()
++assert formats, 'no formats parsed out of BUILD_INFO.txt'
++for fmt in formats:
++    spec = FormatSpec.from_format_string(fmt)
++    if spec.battle_type == BattleType.RANDOM_BATTLE:
++        RandomBattleTeamDatasets().initialize(spec)
++    elif spec.battle_type == BattleType.BATTLE_FACTORY:
++        get_pkmn_sets_file(spec.full_name, 'factory-sets.json')
++    else:
++        SmogonSets().initialize(spec, set())
++        TeamDatasets().initialize(spec, set())
++    print(f'  {fmt}: OK (cache-only, zero network)')
++print('all pre-warmed formats verified under FOUL_PLAY_CACHE_ONLY=1')
++"
++
+ echo "==> starting the bundled showdown server briefly"
+ chroot "$TMP" /usr/bin/env -i HOME=/root PATH=/usr/local/bin:/usr/bin:/bin \
+     sh -c 'cd /opt/pokemon-showdown && node pokemon-showdown start --skip-build 8000' &

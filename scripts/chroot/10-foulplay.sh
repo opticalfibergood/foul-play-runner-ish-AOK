@@ -71,8 +71,32 @@ if ! git apply --check "$PATCH_DIR/foulplay-disable-ping-keepalive.patch" 2>/tmp
 fi
 git apply "$PATCH_DIR/foulplay-disable-ping-keepalive.patch"
 
-echo "==> Verifying the patched file (syntax + structure)"
-python3 -m py_compile fp/websocket_client.py
+echo "==> Applying foulplay-cache-only-datasets.patch"
+# Modifies fp/data/sets/base.py's get_sets_file() and fp/data/sets/
+# smogon.py's _get_smogon_stats_json() so that when FOUL_PLAY_CACHE_ONLY=1
+# is set at runtime (used by start-showdown, same opt-in-per-process
+# pattern as FOUL_PLAY_NOGUEST_LOGIN above -- see
+# scripts/chroot/40-launchers-and-cleanup.sh) a cache miss raises a clear
+# RuntimeError immediately instead of attempting a `requests.get()` that
+# can never succeed on a device with no internet access at all -- no more
+# hanging or an opaque connection error mid-battle. A cache *hit* is
+# completely unaffected (still just reads the file, as before); every
+# other caller (foul-play run directly, e.g. against the real ladder)
+# never sets this env var and is completely unaffected either way.
+# Pairs with scripts/chroot/36-warm-datasets.sh, which pre-populates that
+# same cache at build time for a known list of formats -- see that
+# script and its WARM_FORMATS for what's actually pre-warmed into this
+# image.
+if ! git apply --check "$PATCH_DIR/foulplay-cache-only-datasets.patch" 2>/tmp/patch-check.err; then
+    echo "error: foulplay-cache-only-datasets.patch no longer applies cleanly to foul-play@${FOUL_PLAY_COMMIT}" >&2
+    cat /tmp/patch-check.err >&2
+    echo "foul-play's fp/data/sets/{base,smogon}.py has likely changed upstream; the patch needs updating." >&2
+    exit 1
+fi
+git apply "$PATCH_DIR/foulplay-cache-only-datasets.patch"
+
+echo "==> Verifying the patched files (syntax check)"
+python3 -m py_compile fp/websocket_client.py fp/data/sets/base.py fp/data/sets/smogon.py
 python3 - <<'PY'
 import ast
 tree = ast.parse(open("fp/websocket_client.py").read())

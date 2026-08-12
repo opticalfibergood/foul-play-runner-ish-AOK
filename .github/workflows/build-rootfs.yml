@@ -61,6 +61,24 @@ on:
         description: "smogon/pokemon-showdown-client git ref to build"
         type: string
         default: master
+      warm_formats:
+        description: >
+          Space-separated list of formats to pre-fetch usage-stats/
+          team-dataset caches for (see scripts/chroot/36-warm-datasets.sh
+          and multiformat/warm_datasets.py), or "auto" for every format
+          this build's own bundled Showdown server can directly be
+          challenged into that foul-play's engine can actually play --
+          singles, laddered, challengeable, gen1-9 (see
+          multiformat/list_compatible_formats.py). "auto" is a big,
+          best-effort sweep (~260 formats as of writing): individual
+          formats with nothing published to fetch (draft leagues,
+          customgame sandboxes, one-off community rotations) are skipped,
+          not build-failing, and the full pass/fail breakdown is always in
+          the release's BUILD_INFO.txt either way. A hand-picked list here
+          instead is treated as exhaustive -- any failure in it fails the
+          build (WARM_STRICT; see 36-warm-datasets.sh).
+        type: string
+        default: auto
       runner:
         description: >
           Runner label. ubuntu-24.04-arm/ubuntu-22.04-arm are GitHub's own
@@ -110,6 +128,7 @@ jobs:
       FOUL_PLAY_REF: ${{ github.event.inputs.foul_play_ref || 'main' }}
       SHOWDOWN_REF: ${{ github.event.inputs.showdown_ref || 'master' }}
       CLIENT_REF: ${{ github.event.inputs.client_ref || 'master' }}
+      WARM_FORMATS: ${{ github.event.inputs.warm_formats || 'auto' }}
     steps:
       - uses: actions/checkout@v4
 

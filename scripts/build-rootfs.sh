@@ -68,6 +68,11 @@ MIRROR_CONCURRENCY="${MIRROR_CONCURRENCY:-24}"
 # (well under a second on a real run; crates.io itself isn't the
 # bottleneck), it's the ~30s compile this is actually meant to save.
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/root/.cargo-target}"
+# Space-separated list of formats to pre-fetch usage-stats/team-dataset
+# caches for, or the default "auto" -- see scripts/chroot/
+# 36-warm-datasets.sh for exactly what "auto" derives and why, and
+# multiformat/list_compatible_formats.py for how.
+WARM_FORMATS="${WARM_FORMATS:-auto}"
 
 # The workflow_dispatch dropdown's "default" choice (meaning "don't override
 # anything") arrives here as the literal string "default" -- normalize it,
@@ -208,6 +213,7 @@ chroot "$ROOTFS" /usr/bin/env -i \
     SHOWDOWN_PORT="$SHOWDOWN_PORT" \
     MIRROR_CONCURRENCY="$MIRROR_CONCURRENCY" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    WARM_FORMATS="$WARM_FORMATS" \
     PATCH_DIR=/build-input/patches \
     MULTIFORMAT_DIR=/build-input/multiformat \
     SCRIPT_DIR=/build-input/scripts \
