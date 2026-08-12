@@ -260,9 +260,17 @@ ARTIFACT_BASENAME="foul-play-showdown-offline"
 ARTIFACT="${ARTIFACT_BASENAME}-alpine${ALPINE_VERSION}-${ARCH}-${TIMESTAMP}.tar.gz"
 
 tar --numeric-owner -czf "$OUT_DIR/$ARTIFACT" -C "$ROOTFS" .
-cp "$OUT_DIR/$ARTIFACT" "$OUT_DIR/${ARTIFACT_BASENAME}-${ARCH}-latest.tar.gz"
+LATEST_ARTIFACT="${ARTIFACT_BASENAME}-${ARCH}-latest.tar.gz"
+cp "$OUT_DIR/$ARTIFACT" "$OUT_DIR/$LATEST_ARTIFACT"
 
-( cd "$OUT_DIR" && sha256sum ./*.tar.gz > checksums.sha256 )
+# Two separate checksum files, not one combined one -- this keeps the
+# dated artifact's checksum out of the rootfs-latest release (and vice
+# versa) so the workflow can select each release's files with a plain
+# glob (dated: *-alpine*, latest: *-latest.tar.gz*) instead of having to
+# pick lines out of a shared checksums file. Filenames intentionally
+# mirror their tarball's name with .sha256 appended.
+( cd "$OUT_DIR" && sha256sum "$ARTIFACT" > "$ARTIFACT.sha256" )
+( cd "$OUT_DIR" && sha256sum "$LATEST_ARTIFACT" > "$LATEST_ARTIFACT.sha256" )
 
 cat >> "$OUT_DIR/BUILD_INFO.txt" <<EOF
 alpine minirootfs: $MINIROOTFS_FILE

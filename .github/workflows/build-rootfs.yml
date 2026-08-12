@@ -180,28 +180,53 @@ jobs:
           path: out/*
           retention-days: 14
 
-      - name: Publish release
+      - name: Publish dated release
         uses: softprops/action-gh-release@v2
         with:
           # Every run gets its own tag (real UTC timestamp, to the second,
-          # plus the short commit sha), so every build becomes its own
-          # release -- nothing gets edited or piled onto a shared release
-          # page. softprops/action-gh-release creates a new release
-          # whenever the tag doesn't already exist yet, which a tag this
-          # specific never will.
+          # plus the short commit sha), so every build becomes its own,
+          # permanent release -- nothing here ever gets edited or piled
+          # onto a shared release page. softprops/action-gh-release
+          # creates a new release whenever the tag doesn't already exist
+          # yet, which a tag this specific never will.
+          #
+          # Only the dated (alpine-version-and-timestamp-named) tarball
+          # goes on this release, never the constant-named "latest" one --
+          # that one belongs solely to the rootfs-latest release below.
+          # Keeping them apart means every dated release keeps exactly the
+          # one tarball URL it was built with, forever, instead of also
+          # carrying a same-named "-latest" asset that stops being true
+          # the moment the next run publishes.
           tag_name: "rootfs-${{ steps.ts.outputs.tag }}"
           name: "foul-play + offline pokemon-showdown rootfs for iSH-AOK (built ${{ steps.ts.outputs.display }})"
           body_path: out/BUILD_INFO.txt
-          # make_latest flags THIS release as the one GitHub's own
-          # "latest release" pointer follows. Combined with build-rootfs.sh
-          # always also copying the tarball to a constant filename
-          # (foul-play-showdown-offline-<arch>-latest.tar.gz, not the
-          # timestamped one), this gives a URL that never needs updating:
-          #   https://github.com/<owner>/<repo>/releases/latest/download/foul-play-showdown-offline-aarch64-latest.tar.gz
-          # always resolves to the newest build, with no version-checking
-          # required on the pulling end.
+          # This release is a historical snapshot, not the one GitHub's
+          # "latest release" pointer should follow -- that's rootfs-latest,
+          # published in the next step.
+          make_latest: false
+          files: |
+            out/*-alpine*.tar.gz
+            out/*-alpine*.tar.gz.sha256
+            out/BUILD_INFO.txt
+
+      - name: Publish rootfs-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Fixed tag, reused every run: softprops/action-gh-release
+          # updates the existing rootfs-latest release in place (replacing
+          # its assets, since overwrite_files defaults to true) instead of
+          # creating a new one, so this stays a single release with a
+          # single, never-changing download URL:
+          #   https://github.com/<owner>/<repo>/releases/download/rootfs-latest/foul-play-showdown-offline-aarch64-latest.tar.gz
+          # (also see the README's "Get the rootfs" section, which links
+          # straight to this tag). make_latest: true additionally makes
+          # this the release GitHub's own "Latest" badge and
+          # /releases/latest/ pointer follow.
+          tag_name: rootfs-latest
+          name: "foul-play + offline pokemon-showdown rootfs for iSH-AOK (latest build)"
+          body_path: out/BUILD_INFO.txt
           make_latest: true
           files: |
-            out/*.tar.gz
-            out/*.sha256
+            out/*-latest.tar.gz
+            out/*-latest.tar.gz.sha256
             out/BUILD_INFO.txt
