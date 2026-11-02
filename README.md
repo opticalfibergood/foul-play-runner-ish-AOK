@@ -339,6 +339,21 @@ equivalent and is ignored when `--format` is omitted -- there's no
   `testclient-new.html` hardcodes an absolute CDN URL for with *no*
   local-path fallback at all, unlike every other data script.
 
+**Rate limiting.** The CDN may throttle a few thousand requests in quick
+succession, and a throttled request must not be mistaken for a file that
+doesn't exist. The mirror script therefore backs off on HTTP 429/503 (honouring
+`Retry-After`), lowers its own concurrency while the CDN pushes back, refuses to
+save an HTML error/challenge page as an image, and -- once the main pass is over
+-- re-requests every file the CDN answered 404 for (and every file that failed)
+slowly, at `MIRROR_RECHECK_CONCURRENCY` (default 2). The final log then keeps
+three things apart: files **confirmed missing** (404 on both passes -- expected,
+most species only have art in one animated family), files **recovered** by the
+re-check (the CDN was throttling; they exist), and files **not fetched** (no
+usable response even after retrying -- says nothing about whether they exist,
+and is listed by name). If the log reports rate limiting, lower
+`MIRROR_CONCURRENCY`. The build aborts if more than 5% of files end up not
+fetched, or early if 50 files in a row fail outright (CDN down/blocking).
+
 The per-species filename (`spriteid`) is computed with the exact same
 algorithm the client itself uses (copied from `battle-dex-data.ts`'s
 `Species` constructor, not guessed) -- verified against a real build's
