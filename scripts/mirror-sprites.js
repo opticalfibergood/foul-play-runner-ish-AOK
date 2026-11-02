@@ -194,7 +194,8 @@
  *     for every species rather than silently mirroring nothing for it --
  *     more bandwidth, but not broken. The extra 404s this can cause for
  *     species without real art in that family are expected and tolerated
- *     (see downloadOne/stats.missing below) either way.
+ *     (see the fetching section below -- 404s are re-checked slowly before
+ *     being reported as genuinely missing) either way.
  *   - old-gen (gen1-gen4) per-species static sprites, for every species
  *     that could actually appear in a battle of that generation
  *     (speciesGenFor() below <= that gen). getSpriteData() picks these
@@ -245,7 +246,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { setTimeout: sleep } = require('node:timers/promises');
 
-const CDN = 'https://play.pokemonshowdown.com';
+// MIRROR_CDN_URL exists so the retry/rate-limit handling below can be tested against a local
+// mock server; nothing in the real build sets it.
+const CDN = (process.env.MIRROR_CDN_URL || 'https://play.pokemonshowdown.com').replace(/\/+$/, '');
 const OUT_DIR = process.argv[2];
 const CONCURRENCY = Number(process.env.MIRROR_CONCURRENCY || 8);
 // Per-attempt deadline for a single fetch (not the retry loop as a whole --
@@ -704,24 +707,173 @@ function buildAvatarFileList(outDir) {
 	return files;
 }
 
-async function downloadOne(relPath, stats) {
+// ---------------------------------------------------------------------------
+// Fetching: rate-limit handling, retries, and honest classification.
+//
+// Every file ends up in exactly one of four buckets, and the log distinguishes
+// them because they mean very different things:
+//   - downloaded / skipped: we have the file.
+//   - confirmed missing: the CDN said 404 on the main pass AND again on a slow,
+//     low-concurrency re-check (see resolveSuspects()). This is the only
+//     bucket that means "doesn't exist on the CDN".
+//   - NOT fetched: we never got a usable answer (HTTP 429/5xx, timeouts, a
+//     challenge/error page served instead of an image, ...), even after
+//     retrying. Says nothing about whether the file exists. The build is
+//     missing it, and that's reported as such -- never as "doesn't exist".
+//
+// Why 404s get a second look: the CDN is entitled to rate limit us (we make
+// thousands of requests), and a limiter or an edge in front of it isn't
+// obliged to say so with a 429 -- a "not found" under load is not something
+// we can rule out from here. Re-requesting suspected-404 files slowly, once
+// the burst is over, separates "really absent" from "we were being throttled".
+// ---------------------------------------------------------------------------
+
+const MAX_ATTEMPTS = 6;
+const BACKOFF_BASE_MS = 500;
+const BACKOFF_CAP_MS = 60_000;
+const DEFAULT_RATE_LIMIT_PAUSE_MS = 2_000;
+// The re-check pass is deliberately gentle: it exists to get an answer from
+// the CDN while it is NOT being hammered, so it must not hammer it itself.
+const RECHECK_CONCURRENCY = Math.max(1, Number(process.env.MIRROR_RECHECK_CONCURRENCY || 2));
+// Re-check every suspected-404 up to this many; above it, re-check a random
+// sample first and only do the rest if the sample shows 404s were bogus.
+// (Brute-force fallback mode legitimately produces thousands of real 404s.)
+const RECHECK_FULL_LIMIT = 1500;
+const RECHECK_SAMPLE_SIZE = 300;
+const MAX_LISTED = 50;
+// Circuit breaker: if this many of the last BREAKER_WINDOW files failed outright
+// (each after all of its retries), the CDN is down or has blocked us -- individual
+// files aren't just unlucky. Stop spending ~15s of retries per remaining file; the
+// rest are marked not-fetched immediately and get one slow re-check afterwards.
+// A sliding window rather than "N in a row" so failures interleaved with
+// successes (a partial block) trip it too.
+const BREAKER_WINDOW = 40;
+const BREAKER_TRIP = 16;
+// Fraction of files allowed to end up not fetched before the build aborts.
+const MAX_FAILURE_RATE = 0.05;
+const IMAGE_EXT = /\.(png|gif|jpe?g|webp)$/i;
+
+// Shared across every in-flight request so one 429 slows *everyone* down
+// rather than each worker finding out for itself. Concurrency is cut in half
+// when the CDN pushes back (AIMD) and creeps back up after a run of successes.
+const throttle = {
+	limit: CONCURRENCY,
+	active: 0,
+	pausedUntil: 0,
+	successStreak: 0,
+	lastCutAt: 0,
+	rateLimitHits: 0,
+	lowestLimit: CONCURRENCY,
+	lastLoggedAt: 0,
+	recent: [],       // last BREAKER_WINDOW final outcomes: true = failed outright
+	giveUp: false,
+	// Set once the file list is known: how many files may end up not fetched
+	// before the build is going to abort anyway (see main()). Infinity until then.
+	failBudget: Infinity,
+
+	async acquire() {
+		for (;;) {
+			const wait = this.pausedUntil - Date.now();
+			if (wait > 0) {
+				await sleep(wait);
+				continue;
+			}
+			if (this.active < this.limit) {
+				this.active++;
+				return;
+			}
+			await sleep(25);
+		}
+	},
+
+	release() {
+		this.active--;
+	},
+
+	noteRateLimited(what, retryAfterMs) {
+		this.rateLimitHits++;
+		this.successStreak = 0;
+		const now = Date.now();
+		const pause = Math.min(retryAfterMs ?? DEFAULT_RATE_LIMIT_PAUSE_MS, BACKOFF_CAP_MS);
+		this.pausedUntil = Math.max(this.pausedUntil, now + pause);
+		// A burst of N simultaneous 429s is one event, not N: only cut once
+		// per couple of seconds, otherwise we'd collapse straight to 1.
+		if (now - this.lastCutAt > 2_000) {
+			this.lastCutAt = now;
+			const before = this.limit;
+			this.limit = Math.max(1, Math.floor(this.limit / 2));
+			// Log the first event, any new low, and otherwise at most every 10s --
+			// a long throttled stretch would otherwise be one line per cut.
+			const newLow = this.limit < this.lowestLimit;
+			this.lowestLimit = Math.min(this.lowestLimit, this.limit);
+			if (newLow || now - this.lastLoggedAt > 10_000) {
+				this.lastLoggedAt = now;
+				console.warn(`  rate limited by CDN (${what}) -- pausing ${(pause / 1000).toFixed(1)}s, ` +
+					`concurrency ${before} -> ${this.limit}`);
+			}
+		}
+	},
+
+	noteFileOutcome(failed) {
+		this.recent.push(failed);
+		if (this.recent.length > BREAKER_WINDOW) this.recent.shift();
+		const failures = this.recent.filter(Boolean).length;
+		if (failures >= BREAKER_TRIP && !this.giveUp) {
+			this.giveUp = true;
+			console.error(`  ${failures} of the last ${this.recent.length} files failed outright -- the CDN looks down or is ` +
+				`blocking us; not retrying the rest now (they get one slow re-check at the end)`);
+		}
+	},
+
+	noteFileOk() {
+		this.noteFileOutcome(false);
+	},
+
+	noteFileFailed() {
+		this.noteFileOutcome(true);
+	},
+
+	noteSuccess() {
+		this.noteFileOk();
+		if (this.limit >= CONCURRENCY) return;
+		if (++this.successStreak >= 25) {
+			this.successStreak = 0;
+			this.limit++;
+		}
+	},
+};
+
+function parseRetryAfter(header) {
+	if (!header) return null;
+	const secs = Number(header);
+	if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+	const date = Date.parse(header);
+	if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+	return null;
+}
+
+// One file, with retries. Never throws. Returns one of:
+//   { outcome: 'ok', bytes }
+//   { outcome: 'notfound' }                      -- the CDN answered 404
+//   { outcome: 'failed', reason, rateLimited }   -- no usable answer
+async function fetchOne(relPath) {
 	const url = `${CDN}/${relPath}`;
 	const dest = path.join(OUT_DIR, relPath);
+	let lastReason = 'unknown error';
+	let sawRateLimit = false;
+	// A file's own retries back off locally; only its first rate-limited response
+	// feeds the global throttle, or one stubborn file would pause and halve
+	// everyone's concurrency once per attempt.
+	let reportedToThrottle = false;
 
-	if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
-		stats.skipped++;
-		return;
-	}
+	if (throttle.giveUp) return { outcome: 'failed', reason: 'not attempted: CDN not responding', rateLimited: false };
 
-	for (let attempt = 1; attempt <= 3; attempt++) {
-		// A stalled connection -- the CDN accepts it but then never finishes
-		// sending a response, more likely now at MIRROR_CONCURRENCY=24 than
-		// it was at the old default of 8 -- doesn't reject fetch() on its
-		// own; without an explicit deadline it just hangs forever, and since
-		// nothing ever throws, the catch block below (and the retry/failure
-		// accounting it does) never runs either. One stuck request would
-		// permanently occupy a pool() slot rather than counting as a
-		// failure like every other broken response already does.
+	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		let retryAfterMs = null;
+		await throttle.acquire();
+		// Per-attempt deadline: a stalled connection doesn't reject fetch() on
+		// its own, so without this one stuck request would occupy a slot
+		// forever instead of counting as a retryable failure.
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 		try {
@@ -730,33 +882,83 @@ async function downloadOne(relPath, stats) {
 				signal: controller.signal,
 			});
 			if (res.status === 404) {
-				stats.missing++;
-				stats.missingList.push(relPath);
-				return;
+				await res.arrayBuffer().catch(() => {});
+				throttle.noteFileOk();
+				return { outcome: 'notfound' };
 			}
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (!res.ok) {
+				retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
+				if (res.status === 429 || res.status === 503 || retryAfterMs !== null) {
+					sawRateLimit = true;
+					if (!reportedToThrottle) {
+						reportedToThrottle = true;
+						throttle.noteRateLimited(`HTTP ${res.status}`, retryAfterMs);
+					}
+				}
+				await res.arrayBuffer().catch(() => {});
+				throw new Error(`HTTP ${res.status}`);
+			}
+			// A 200 whose body is an HTML page where an image should be is a
+			// challenge/error page, not the file. Writing it to foo.png would
+			// "succeed" and leave a corrupt sprite behind.
+			const contentType = res.headers.get('content-type') || '';
+			if (IMAGE_EXT.test(relPath) && /^text\//i.test(contentType)) {
+				sawRateLimit = true;
+				if (!reportedToThrottle) {
+					reportedToThrottle = true;
+					throttle.noteRateLimited(`HTTP 200 but ${contentType} instead of an image`, null);
+				}
+				await res.arrayBuffer().catch(() => {});
+				throw new Error(`got ${contentType} instead of an image (likely a rate-limit/challenge page)`);
+			}
 
 			const buf = Buffer.from(await res.arrayBuffer());
 			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			fs.writeFileSync(dest, buf);
-			stats.downloaded++;
-			stats.bytes += buf.length;
-			return;
+			// Write-then-rename so an interrupted run can't leave a truncated
+			// file that the "already present" check would later trust.
+			const tmp = `${dest}.part`;
+			fs.writeFileSync(tmp, buf);
+			fs.renameSync(tmp, dest);
+			throttle.noteSuccess();
+			return { outcome: 'ok', bytes: buf.length };
 		} catch (err) {
-			// AbortController's own rejection is a plain DOMException named
-			// 'AbortError' with a generic "This operation was aborted"
-			// message -- worth relabeling here so a timeout shows up in
-			// failedList (and the console) as an actual timeout, not an
-			// unexplained abort.
-			const message = err.name === 'AbortError' ? `timed out after ${FETCH_TIMEOUT_MS / 1000}s` : err.message;
-			if (attempt === 3) {
-				stats.failed++;
-				stats.failedList.push(`${relPath}: ${message}`);
-				return;
-			}
-			await sleep(300 * attempt);
+			lastReason = err.name === 'AbortError' ? `timed out after ${FETCH_TIMEOUT_MS / 1000}s` : err.message;
+			if (attempt === MAX_ATTEMPTS) break;
 		} finally {
 			clearTimeout(timeout);
+			throttle.release(); // released before backing off so sleeping doesn't hold a slot
+		}
+		const base = retryAfterMs ?? BACKOFF_BASE_MS * 2 ** (attempt - 1);
+		await sleep(Math.min(base, BACKOFF_CAP_MS) * (0.75 + Math.random() * 0.5));
+	}
+	throttle.noteFileFailed();
+	return { outcome: 'failed', reason: lastReason, rateLimited: sawRateLimit };
+}
+
+// Main-pass wrapper. A 404 here is only a *suspect* -- see resolveSuspects().
+async function downloadOne(relPath, stats) {
+	const dest = path.join(OUT_DIR, relPath);
+	if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
+		stats.skipped++;
+		return;
+	}
+	const r = await fetchOne(relPath);
+	if (r.outcome === 'ok') {
+		stats.downloaded++;
+		stats.bytes += r.bytes;
+	} else if (r.outcome === 'notfound') {
+		stats.suspect404.push(relPath);
+	} else {
+		stats.failedItems.push({ relPath, reason: r.reason, rateLimited: r.rateLimited });
+		// Failures needn't be consecutive to mean the run is doomed: if more
+		// files have already failed than the build tolerates, retrying every
+		// remaining unlucky file at ~15s apiece would only turn a fast abort
+		// into a very slow one. Stop attempting new files now; everything
+		// skipped (and everything failed) still gets the slow re-check below.
+		if (stats.failedItems.length > throttle.failBudget && !throttle.giveUp) {
+			throttle.giveUp = true;
+			console.error(`  ${stats.failedItems.length} files have failed outright (more than the ${MAX_FAILURE_RATE * 100}% ` +
+				`the build tolerates) -- not attempting the rest now; they get one slow re-check at the end`);
 		}
 	}
 }
@@ -773,7 +975,111 @@ async function pool(items, worker, concurrency) {
 }
 
 function newStats() {
-	return { downloaded: 0, skipped: 0, missing: 0, failed: 0, bytes: 0, missingList: [], failedList: [] };
+	return {
+		downloaded: 0, skipped: 0, bytes: 0,
+		suspect404: [],          // 404 on the main pass, not yet trusted
+		failedItems: [],         // no usable answer on the main pass
+		missingList: [],         // confirmed 404 on the slow re-check too
+		recovered404: [],        // said 404 on the main pass, exist on re-check
+		recoveredFailed: [],     // failed on the main pass, fetched on re-check
+		failedFinal: [],         // still no usable answer after the re-check
+	};
+}
+
+// Re-request `paths` slowly and sort them into recovered / still-404 / failed.
+async function recheck(paths, stats) {
+	const result = { recovered: [], notfound: [], failed: [] };
+	await pool(paths, async (relPath) => {
+		const r = await fetchOne(relPath);
+		if (r.outcome === 'ok') {
+			stats.downloaded++;
+			stats.bytes += r.bytes;
+			result.recovered.push(relPath);
+		} else if (r.outcome === 'notfound') {
+			result.notfound.push(relPath);
+		} else {
+			result.failed.push(`${relPath}: ${r.reason}`);
+		}
+	}, RECHECK_CONCURRENCY);
+	return result;
+}
+
+function sample(arr, n) {
+	const copy = arr.slice();
+	for (let i = copy.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[copy[i], copy[j]] = [copy[j], copy[i]];
+	}
+	return copy.slice(0, n);
+}
+
+// Turns the main pass's suspects into final answers. After this, missingList
+// holds only files the CDN said 404 for on a quiet re-check, and failedFinal
+// holds only files we genuinely could not get an answer for.
+async function resolveSuspects(stats) {
+	// Files the breaker never even attempted go first: they haven't had a real try,
+	// so if the CDN has recovered they should all succeed. The genuinely stuck ones
+	// go last, so if THEY trip the breaker again it only skips files that were
+	// going to fail anyway, rather than starving healthy ones queued behind them.
+	const notAttempted = (f) => f.reason.startsWith('not attempted');
+	const failedPaths = [...stats.failedItems]
+		.sort((a, b) => Number(notAttempted(b)) - Number(notAttempted(a)))
+		.map((f) => f.relPath);
+	const total = stats.suspect404.length + failedPaths.length;
+	if (total === 0) return;
+
+	// Let any rate-limit window we caused expire before asking again.
+	const cooldown = throttle.rateLimitHits ? 10_000 : 1_000;
+	console.log(`Re-checking ${stats.suspect404.length} suspected-missing and ${failedPaths.length} unfetched ` +
+		`files slowly (concurrency ${RECHECK_CONCURRENCY}) to tell "doesn't exist" from "was throttled"...`);
+	await sleep(Math.max(cooldown, throttle.pausedUntil - Date.now()));
+	// The breaker may have tripped during the main pass; the cooldown is exactly
+	// the chance for the CDN to have recovered, so give it a clean slate.
+	throttle.giveUp = false;
+	throttle.recent = [];
+
+	// Files that failed outright: try again; a 404 now means it's really absent.
+	if (failedPaths.length) {
+		const r = await recheck(failedPaths, stats);
+		stats.recoveredFailed.push(...r.recovered);
+		stats.missingList.push(...r.notfound);
+		stats.failedFinal.push(...r.failed);
+	}
+
+	// Files the main pass reported as 404.
+	let toCheck = stats.suspect404;
+	let trusted = [];
+	if (toCheck.length > RECHECK_FULL_LIMIT) {
+		const probe = sample(toCheck, RECHECK_SAMPLE_SIZE);
+		const probeSet = new Set(probe);
+		const r = await recheck(probe, stats);
+		stats.recovered404.push(...r.recovered);
+		stats.missingList.push(...r.notfound);
+		stats.failedFinal.push(...r.failed);
+		if (r.recovered.length === 0) {
+			// The sample says the 404s are genuine; don't re-ask for thousands more.
+			trusted = toCheck.filter((p) => !probeSet.has(p));
+			toCheck = [];
+		} else {
+			console.warn(`  ${r.recovered.length}/${probe.length} sampled "404" files actually exist -- ` +
+				`re-checking all remaining suspected-missing files`);
+			toCheck = toCheck.filter((p) => !probeSet.has(p));
+		}
+	}
+	if (toCheck.length) {
+		const r = await recheck(toCheck, stats);
+		stats.recovered404.push(...r.recovered);
+		stats.missingList.push(...r.notfound);
+		stats.failedFinal.push(...r.failed);
+	}
+	stats.missingList.push(...trusted);
+}
+
+function listSome(lines, label) {
+	const shown = lines.slice(0, MAX_LISTED);
+	console.error(`${label}:`);
+	for (const l of shown) console.error(`  ${l}`);
+	if (lines.length > shown.length) console.error(`  ... and ${lines.length - shown.length} more`);
 }
 
 async function main() {
@@ -800,6 +1106,12 @@ async function main() {
 		const absPath = path.resolve(path.join(OUT_DIR, family.dataFile));
 		try {
 			dicts[family.dictExport] = tryReadDict(absPath, family.dictExport);
+			if (!dicts[family.dictExport]) {
+				// tryReadDict returns null for a missing/empty file. Treating that as
+				// "this family has no art for anyone" would silently mirror zero
+				// animated sprites for it -- e.g. when the fetch above was throttled.
+				throw new Error('file could not be fetched');
+			}
 		} catch (err) {
 			console.error(`warning: couldn't read animated-sprite metadata from ${family.dataFile} (${err.message}) -- ` +
 				`falling back to fetching every ${family.dictExport === 'BattlePokemonSprites' ? 'current-gen' : 'BW'} ` +
@@ -820,34 +1132,55 @@ async function main() {
 	// individual collision.
 	const files = [...new Set([...buildFixedFileList(), ...speciesFiles, ...avatarFiles])];
 	console.log(`Mirroring ${files.length} sprite/icon/data files (concurrency ${CONCURRENCY})...`);
+	throttle.failBudget = Math.floor(files.length * MAX_FAILURE_RATE);
 
 	const start = Date.now();
 	await pool(files, (f) => downloadOne(f, stats), CONCURRENCY);
+	await resolveSuspects(stats);
 	const seconds = ((Date.now() - start) / 1000).toFixed(1);
 
+	const recovered = stats.recovered404.length + stats.recoveredFailed.length;
 	console.log(`Done in ${seconds}s: ${stats.downloaded} downloaded, ${stats.skipped} already present, ` +
-		`${stats.missing} missing on CDN (expected -- most species only have art in one animated family), ` +
-		`${stats.failed} failed, ${(stats.bytes / 1024 / 1024).toFixed(1)} MiB fetched.`);
+		`${(stats.bytes / 1024 / 1024).toFixed(1)} MiB fetched.`);
+	console.log(`  ${stats.missingList.length} confirmed missing on CDN (404 on the main pass and again on a slow ` +
+		`re-check -- expected, most species only have art in one animated family)`);
+	if (recovered) {
+		console.log(`  ${recovered} files were recovered by the re-check ` +
+			`(${stats.recovered404.length} had been answered 404, ${stats.recoveredFailed.length} had failed) -- ` +
+			`the CDN was throttling us, they do exist`);
+	}
+	if (throttle.rateLimitHits) {
+		console.log(`  CDN rate limiting seen ${throttle.rateLimitHits} time(s); concurrency dipped to ` +
+			`${throttle.lowestLimit} of ${CONCURRENCY}. Consider a lower MIRROR_CONCURRENCY.`);
+	}
+	if (stats.failedFinal.length) {
+		console.error(`  ${stats.failedFinal.length} files NOT FETCHED (no usable response even after retrying) -- ` +
+			`this does NOT mean they don't exist on the CDN, only that this build doesn't have them`);
+		listSome(stats.failedFinal, 'Not fetched');
+	}
 
-	// A handful of failures (network blips) are tolerable; a LOT of them
-	// means something structural is wrong (wrong URL pattern, CDN down,
-	// no network) and the build should stop rather than ship a rootfs
-	// with mostly-broken sprites. (404s are tracked separately as
-	// "missing", not "failed", and are NOT subject to this budget --
+	// A handful of unfetched files (network blips) are tolerable; a LOT of
+	// them means something structural is wrong (CDN down/blocking us, no
+	// network, concurrency far too high) and the build should stop rather
+	// than ship a rootfs with mostly-broken sprites. Confirmed 404s are
+	// "missing", not "not fetched", and are NOT subject to this budget --
 	// they're an expected, unbounded outcome of mirroring two animated
-	// families per species when most species only have art in one.)
-	const failureRate = stats.failed / files.length;
-	if (failureRate > 0.05) {
-		console.error(`error: ${stats.failed}/${files.length} downloads failed (${(failureRate * 100).toFixed(1)}%) -- aborting`);
-		console.error(stats.failedList.slice(0, 20).join('\n'));
+	// families per species when most species only have art in one.
+	// (+ the animation-metadata files, which are fetched separately from `files`)
+	const totalFiles = files.length + ANIMATED_FAMILIES.length;
+	const failureRate = stats.failedFinal.length / totalFiles;
+	if (failureRate > MAX_FAILURE_RATE) {
+		console.error(`error: ${stats.failedFinal.length}/${totalFiles} files could not be fetched ` +
+			`(${(failureRate * 100).toFixed(1)}%) -- aborting` +
+			(throttle.rateLimitHits ? ' (the CDN was rate limiting; retry with a lower MIRROR_CONCURRENCY)' : ''));
 		process.exit(1);
 	}
 
 	fs.writeFileSync(
 		path.join(OUT_DIR, 'SPRITE_MIRROR_INFO.txt'),
 		`mirrored: ${stats.downloaded} files, ${(stats.bytes / 1024 / 1024).toFixed(1)} MiB\n` +
-		`missing on CDN: ${stats.missing}\n` +
-		`failed: ${stats.failed}\n` +
+		`confirmed missing on CDN (404, re-checked): ${stats.missingList.length}\n` +
+		`not fetched (rate limited / network errors, may exist on CDN): ${stats.failedFinal.length}\n` +
 		`static species sprite dirs (default gen): ${STATIC_SPECIES_SPRITE_DIRS.join(', ')}\n` +
 		`old-gen static sprite dirs: ${Object.values(OLD_GEN_STATIC_DIRS).flat().join(', ')}\n` +
 		`animated families: ${ANIMATED_FAMILIES.map(f => f.dictExport).join(', ')}` +

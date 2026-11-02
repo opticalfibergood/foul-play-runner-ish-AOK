@@ -55,9 +55,12 @@ SHOWDOWN_PORT="${SHOWDOWN_PORT:-8000}"
 # ~17k files at concurrency 8, almost entirely latency- rather than
 # bandwidth-bound -- a hosted CI runner has headroom to go higher. Started
 # at 24, not higher, since this hasn't been tuned against the real CDN's
-# actual rate-limit tolerance from outside a live run; mirror-sprites.js's
-# own 5%-failure-rate abort (see its own comments) is the backstop if this
-# turns out to be too aggressive.
+# actual rate-limit tolerance from outside a live run. mirror-sprites.js now
+# adapts on its own if the CDN pushes back (backs off on 429/503/Retry-After,
+# lowers its own concurrency, re-checks anything the CDN answered 404 or failed
+# on once the burst is over, and reports files it could not fetch separately
+# from files the CDN confirmed don't exist) -- but each throttle event costs
+# build time, so if the log says "CDN rate limiting seen", lower this.
 MIRROR_CONCURRENCY="${MIRROR_CONCURRENCY:-24}"
 # Cargo's own build-artifact cache normally lives under a per-invocation
 # temp directory (pip's own build isolation puts it under
